@@ -152,7 +152,9 @@
     const MAX_SPRITES = 10;      // 화면에 동시에 뛰어다니는 불똥이 수
     const GUIDE_H = 0.55;        // 화면에 보이는 불똥이 틀의 키 (화면 높이 비율)
     const GUIDE_COLOR = '#FE3636';               // 불똥이 틀 테두리 색
-    const GUIDE_GLOW = 'rgba(254, 54, 54, 0.7)'; // 테두리 주변 은은한 빛 (같은 색)
+    const NEON_CORE = '#FFE4E4';                 // 네온관 가운데 하얗게 달아오른 심지 색
+    // 네온 빛 퍼짐 [흐림 px, 세기] (넓게 → 좁게). 같은 층을 여러 번 겹쳐 그리면 빛이 더 진하게 퍼짐
+    const NEON_GLOW = [[56, 1], [56, 1], [30, 1], [30, 0.8], [14, 1], [6, 1]];
     const WORK_W = 200;          // 인식용 축소 해상도 (가로)
     const MARGIN = 0.15;         // 틀 바깥으로 얼마나 더 보고 판단할지 (틀 크기 비율)
     const COVER_OK = 0.8;        // 틀 안이 불똥이로 이만큼 차 있어야 함
@@ -301,19 +303,24 @@
       const fill = make(), ring = make();
       const f = fill.getContext('2d');
       f.drawImage(guideSil, 6, 6, w, h);
-      const r = ring.getContext('2d');
-      for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) r.drawImage(guideSil, 6 + Math.cos(a) * 4, 6 + Math.sin(a) * 4, w, h);
-      r.globalCompositeOperation = 'destination-out';
-      r.drawImage(guideSil, 6, 6, w, h);
-      r.globalCompositeOperation = 'source-in';   // 테두리 색
-      r.fillStyle = GUIDE_COLOR;
-      r.fillRect(0, 0, ring.width, ring.height);
-      const hot = make(), hc = hot.getContext('2d');
-      hc.drawImage(ring, 0, 0);
-      hc.globalCompositeOperation = 'source-in';
-      hc.fillStyle = '#ff7a1a';
-      hc.fillRect(0, 0, hot.width, hot.height);
-      Object.assign(guideCache, { key, fill, ring, hot });
+      // 실루엣 바깥쪽으로 inner~outer px 떨어진 띠 (color 색)
+      const band = (canvas, inner, outer, color) => {
+        const c = canvas.getContext('2d');
+        for (let a = 0; a < Math.PI * 2; a += Math.PI / 12) c.drawImage(guideSil, 6 + Math.cos(a) * outer, 6 + Math.sin(a) * outer, w, h);
+        c.globalCompositeOperation = 'destination-out';
+        if (inner > 0) for (let a = 0; a < Math.PI * 2; a += Math.PI / 12) c.drawImage(guideSil, 6 + Math.cos(a) * inner, 6 + Math.sin(a) * inner, w, h);
+        else c.drawImage(guideSil, 6, 6, w, h);
+        c.globalCompositeOperation = 'source-in';
+        c.fillStyle = color;
+        c.fillRect(0, 0, canvas.width, canvas.height);
+      };
+      band(ring, 0, 4, GUIDE_COLOR);            // 네온관 (빨강)
+      const hot = make(); band(hot, 0, 4, '#ff7a1a');   // 스캔 중 (주황)
+      const core = make(); band(core, 1.3, 2.7, NEON_CORE);  // 네온관 한가운데 하얗게 달아오른 심지
+      // 넓은 빛용 두꺼운 띠 (가는 관을 크게 흐리면 빛이 너무 묽어져서)
+      const thick = make(); band(thick, 0, 10, GUIDE_COLOR);
+      const thickHot = make(); band(thickHot, 0, 10, '#ff7a1a');
+      Object.assign(guideCache, { key, fill, ring, hot, core, thick, thickHot });
       return guideCache;
     }
 
@@ -1120,20 +1127,35 @@
     function drawGuide(g) {
       const img = guideImages(g.w, g.h);
       const progress = armed && inside ? Math.min(1, stableCount / STABLE_NEEDED) : 0;
+      // 네온사인: 넓게 퍼지는 빛 → 관(빨강) → 하얗게 달아오른 심지
+      // 빨강 → 불똥이가 들어오면 주황으로 차오름. 아주 천천히 숨 쉬듯 밝기가 변함('동작 줄이기'면 고정)
+      const dpr = window.devicePixelRatio || 1;
+      const breathe = reduceMotion ? 1 : 0.9 + 0.1 * Math.sin(performance.now() / 1000 * 2.0);
+      const base = (armed ? 1 : 0.4) * presence;
+      const x = g.x - 6, y = g.y - 6, FAR = 10000;
+      // 빛만 그리기: 그림을 화면 밖에 두고 그림자만 화면 안으로 옮김
+      const glow = (im, color, blur, alpha) => {
+        ctx.globalAlpha = alpha;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = blur * dpr;
+        ctx.shadowOffsetX = FAR * dpr;
+        ctx.drawImage(im, x - FAR, y);
+      };
       ctx.save();
-      // 테두리: 흰색 → 불똥이가 들어오면 주황으로 빛남 (틀을 띄웠을 때만 보임)
-      // 어떤 배경에서도 보이게 은은한 빛을 두름
-      ctx.globalAlpha = (armed ? 0.95 : 0.4) * (1 - progress) * presence;
-      ctx.shadowColor = GUIDE_GLOW;
-      ctx.shadowBlur = 10;
-      ctx.drawImage(img.ring, g.x - 6, g.y - 6);
-      ctx.shadowBlur = 0;
-      if (progress > 0) {
-        ctx.globalAlpha = progress * presence;
-        ctx.shadowColor = '#ff7a1a';
-        ctx.shadowBlur = 10 + progress * 25;
-        ctx.drawImage(img.hot, g.x - 6, g.y - 6);
+      ctx.globalCompositeOperation = 'lighter';   // 빛이 겹칠수록 밝아지게
+      for (const [thin, wide, color, k] of [[img.ring, img.thick, GUIDE_COLOR, 1 - progress], [img.hot, img.thickHot, '#ff7a1a', progress]]) {
+        if (k <= 0.001) continue;
+        for (const [blur, a] of NEON_GLOW) glow(blur > 15 ? wide : thin, color, blur, base * a * k * breathe);
       }
+      ctx.shadowColor = 'transparent';
+      ctx.shadowOffsetX = 0;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = base * (1 - progress);
+      ctx.drawImage(img.ring, x, y);
+      if (progress > 0) { ctx.globalAlpha = base * progress; ctx.drawImage(img.hot, x, y); }
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = base * 0.9 * breathe;
+      ctx.drawImage(img.core, x, y);
       ctx.restore();
     }
 
