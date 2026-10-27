@@ -409,7 +409,7 @@
           catch (e) { track = await openCamera(); }   // 실패하면 기본 카메라 유지
         }
         camSelect.value = track.getSettings().deviceId;
-        if (segmenter) status.textContent = 'Space를 누르면 불똥이 틀이 나타나요';
+        if (segmenter) status.textContent = 'Space를 눌러 불똥이를 추가해보세요';
       } catch (err) {
         status.textContent = CAMERA_ERRORS[err.name] || ('카메라 오류: ' + err.name + ' ' + err.message);
       }
@@ -661,7 +661,7 @@
       missCount = 0;
       inside = false;
       lastInfo = null;
-      status.textContent = on ? '불똥이를 틀에 맞춰주세요' : 'Space를 누르면 불똥이 틀이 나타나요';
+      status.textContent = on ? '불똥이를 틀에 맞춰주세요' : 'Space를 눌러 불똥이를 추가해보세요';
       // 주요 버튼: 틀이 떠 있으면 "닫기"로
       const btn = document.getElementById('btnCapture');
       btn.classList.toggle('on', on);
@@ -1509,7 +1509,7 @@
     startLaptopCamera();
     loadModels()
       .then(() => {
-        if (video.videoWidth) status.textContent = 'Space를 누르면 불똥이 틀이 나타나요';
+        if (video.videoWidth) status.textContent = 'Space를 눌러 불똥이를 추가해보세요';
         detectLoop();
       })
       .catch(err => { status.textContent = 'AI 모델을 불러오지 못했어요: ' + err.message; });
