@@ -200,6 +200,9 @@
     const PINCH_ON = 0.35;       // 엄지-검지 거리가 손 크기의 이 비율보다 가까우면 "집음"
     const PINCH_OFF = 0.5;       // 이보다 멀어지면 "놓음" (중간은 이전 상태 유지 → 덜 끊김)
     const GRAB_RADIUS = 0.6;     // 불똥이 키의 이 비율 안에서 집으면 잡힘
+    const MAX_HANDS = 4;         // 동시에 인식하는 손 개수 (손마다 불똥이 하나씩 잡을 수 있음)
+    const CURSOR_R = 18;         // 핀치 커서 크기 (손가락을 벌렸을 때)
+    const CURSOR_R_PRESS = 9;    // 집었을 때 커서 크기
 
     const video = document.getElementById('video');
     const stage = document.getElementById('stage');
@@ -214,7 +217,12 @@
     let hands = null;
     let lastHandTime = -1;
     // 핀치 커서 (화면 좌표). sprite = 지금 집고 있는 불똥이
-    const pinch = { visible: false, down: false, x: 0, y: 0, vx: 0, vy: 0, sprite: null, offX: 0, offY: 0 };
+    // 손마다 핀치 커서 하나 (최대 MAX_HANDS개). sprite = 그 손이 집고 있는 불똥이
+    const pinches = Array.from({ length: MAX_HANDS }, () => ({
+      visible: false, seen: false, miss: 0, down: false, x: 0, y: 0, vx: 0, vy: 0, gap: 1,
+      sprite: null, offX: 0, offY: 0, hover: null,
+      alpha: 0, r: CURSOR_R, press: 0, accent: 0       // 커서 애니메이션 상태
+    }));
     let sprites = [];
     let particles = [];
     let showUI = true;
@@ -440,7 +448,7 @@
       // 손 인식은 실패해도 사진 인식은 계속 되게 따로
       const makeHands = (delegate) => HandLandmarker.createFromOptions(vision, {
         baseOptions: { modelAssetPath: HAND_MODEL, delegate },
-        runningMode: 'VIDEO', numHands: 1
+        runningMode: 'VIDEO', numHands: MAX_HANDS
       });
       try { hands = await makeHands('GPU'); }
       catch (e) {
@@ -464,70 +472,136 @@
       lastHandTime = video.currentTime;
       let res;
       try { res = hands.detectForVideo(video, now); } catch (e) { return; }
-      const lm = res.landmarks && res.landmarks[0];
-      if (!lm) {
-        pinch.visible = false;
-        if (pinch.down) pinchEnd();
-        return;
-      }
-      // 손 크기(손목~가운데 손가락 뿌리) 대비 엄지 끝~검지 끝 거리
-      const size = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 1;      const gap = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) / size;
-      const p = toScreen({ x: (lm[4].x + lm[8].x) / 2, y: (lm[4].y + lm[8].y) / 2 });
 
-      // 살짝 부드럽게 따라가기 (손 떨림 줄이기)
-      const k = pinch.visible ? 0.5 : 1;
-      const nx = pinch.x + (p.x - pinch.x) * k, ny = pinch.y + (p.y - pinch.y) * k;
-      if (dt > 0 && pinch.visible) {
-        pinch.vx = pinch.vx * 0.6 + ((nx - pinch.x) / dt) * 0.4;
-        pinch.vy = pinch.vy * 0.6 + ((ny - pinch.y) / dt) * 0.4;
-      }
-      pinch.x = nx; pinch.y = ny;
-      pinch.visible = true;
+      // 손마다: 엄지·검지 사이 위치, 손 크기(손목~가운데 손가락 뿌리) 대비 두 손가락 거리
+      const found = (res.landmarks || []).map(lm => {
+        const size = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 1;
+        const p = toScreen({ x: (lm[4].x + lm[8].x) / 2, y: (lm[4].y + lm[8].y) / 2 });
+        return { x: p.x, y: p.y, gap: Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) / size };
+      });
 
-      if (!pinch.down && gap < PINCH_ON) pinchStart();
-      else if (pinch.down && gap > PINCH_OFF) pinchEnd();
+      // 이번 프레임의 손을 지난 프레임의 같은 손과 짝지음 (가까운 것끼리) → 손마다 따로 집기
+      for (const p of pinches) p.seen = false;
+      for (const f of found) {
+        let best = null, bestD = Infinity;
+        for (const p of pinches) {
+          if (p.seen || !p.visible) continue;
+          const d = Math.hypot(p.x - f.x, p.y - f.y);
+          if (d < bestD) { best = p; bestD = d; }
+        }
+        if (!best || bestD > innerHeight * 0.25) best = pinches.find(p => !p.seen && !p.visible) || best;
+        if (best && !best.seen) trackHand(best, f, dt);
+      }
+      // 몇 프레임 연속으로 안 보이면 사라진 손 (잡고 있던 불똥이는 놓음)
+      for (const p of pinches) {
+        if (!p.seen && p.visible && ++p.miss > 4) { p.visible = false; if (p.down) pinchEnd(p); }
+      }
     }
 
-    function pinchStart() {
-      pinch.down = true;
-      // 집은 곳에서 가장 가까운 불똥이 (몸통 가운데 기준)
+    function trackHand(p, f, dt) {
+      p.seen = true;
+      p.miss = 0;
+      // 살짝 부드럽게 따라가기 (손 떨림 줄이기)
+      const k = p.visible ? 0.5 : 1;
+      const nx = p.x + (f.x - p.x) * k, ny = p.y + (f.y - p.y) * k;
+      if (dt > 0 && p.visible) {
+        p.vx = p.vx * 0.6 + ((nx - p.x) / dt) * 0.4;
+        p.vy = p.vy * 0.6 + ((ny - p.y) / dt) * 0.4;
+      } else { p.vx = 0; p.vy = 0; }
+      p.x = nx; p.y = ny;
+      p.gap = f.gap;
+      p.visible = true;
+      if (!p.down && f.gap < PINCH_ON) pinchStart(p);
+      else if (p.down && f.gap > PINCH_OFF) pinchEnd(p);
+    }
+
+    // 손가락 사이에서 가장 가까운, 아무도 안 잡은 불똥이
+    function grabbable(p) {
       let best = null, bestD = Infinity;
       for (const s of sprites) {
-        const cy = s.y - s.h * 0.5;
-        const d = Math.hypot(pinch.x - s.x, pinch.y - cy);
+        if (s.holder) continue;
+        const d = Math.hypot(p.x - s.x, p.y - (s.y - s.h * 0.5));
         if (d < s.h * GRAB_RADIUS && d < bestD) { best = s; bestD = d; }
       }
-      if (!best) return;
-      pinch.sprite = best;
-      pinch.offX = best.x - pinch.x;
-      pinch.offY = best.y - pinch.y;
-      best.held = true;
-      spark(pinch.x, pinch.y, 10);
+      return best;
     }
 
-    function pinchEnd() {
-      pinch.down = false;
-      const s = pinch.sprite;
+    function pinchStart(p) {
+      p.down = true;
+      const s = grabbable(p);
       if (!s) return;
-      s.held = false;
-      // 던진 방향으로 달려가게
-      const sp = Math.hypot(pinch.vx, pinch.vy);
-      if (sp > 200) { s.vx = pinch.vx / sp; s.vy = pinch.vy / sp; s.turnIn = 1.5; }
-      s.fallV = 0;
-      pinch.sprite = null;
+      p.sprite = s;
+      p.offX = s.x - p.x;
+      p.offY = s.y - p.y;
+      s.holder = p;
+      spark(p.x, p.y, 10);
     }
 
-    function drawPinchCursor() {
-      if (!pinch.visible) return;
-      ctx.save();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-      ctx.fillStyle = pinch.down ? 'rgba(254, 54, 54, 0.9)' : 'rgba(255, 255, 255, 0.25)';
-      ctx.beginPath();
-      ctx.arc(pinch.x, pinch.y, pinch.down ? 10 : 16, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
+    function pinchEnd(p) {
+      p.down = false;
+      const s = p.sprite;
+      if (!s) return;
+      s.holder = null;
+      // 던진 방향으로 달려가게
+      const sp = Math.hypot(p.vx, p.vy);
+      if (sp > 200) { s.vx = p.vx / sp; s.vy = p.vy / sp; s.turnIn = 1.5; }
+      s.fallV = 0;
+      p.sprite = null;
+    }
+
+    // 손가락이 불똥이 위에 있으면 "잡을 수 있음" 표시 (HIG: 상호작용 가능한 대상에 hover 피드백)
+    function updateHover() {
+      for (const s of sprites) s.hovered = false;
+      for (const p of pinches) {
+        p.hover = p.visible && !p.down ? grabbable(p) : null;
+        if (p.hover) p.hover.hovered = true;
+      }
+    }
+
+    // 핀치 커서 (iPad 포인터·visionOS 스타일)
+    //  - 평소: 반투명 유리 원 + 얇은 테두리, 위쪽에 반사광
+    //  - 손가락을 모을수록 원이 작아짐 → 집기 직전 피드백
+    //  - 불똥이 위: 테두리가 강조색으로, 원이 살짝 커짐
+    //  - 집으면: 작은 강조색 점으로 꽉 참
+    function drawPinchCursors(dt) {
+      const k = reduceMotion ? 1 : Math.min(1, dt * 14);
+      for (const p of pinches) {
+        p.alpha += ((p.visible ? 1 : 0) - p.alpha) * (reduceMotion ? 1 : Math.min(1, dt * 10));
+        if (p.alpha < 0.01) continue;
+        const close = Math.min(1, Math.max(0, (p.gap - PINCH_ON) / (0.9 - PINCH_ON)));
+        let rT = p.down ? CURSOR_R_PRESS : CURSOR_R_PRESS + (CURSOR_R - CURSOR_R_PRESS) * close;
+        if (p.hover) rT *= 1.25;
+        p.r += (rT - p.r) * k;
+        p.press += ((p.down ? 1 : 0) - p.press) * k;
+        const accent = p.hover || p.down ? 1 : 0;
+        p.accent += (accent - p.accent) * k;
+
+        ctx.save();
+        ctx.globalAlpha = p.alpha;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
+        ctx.shadowBlur = 12;
+        ctx.shadowOffsetY = 2;
+        // 채움: 반투명 흰색 → 집으면 강조색
+        const a = 0.18 + 0.72 * p.press;
+        ctx.fillStyle = `rgba(${255 - p.press}, ${Math.round(255 - 201 * p.press)}, ${Math.round(255 - 201 * p.press)}, ${a})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowColor = 'transparent';
+        // 테두리: 흰색 → 잡을 수 있거나 잡으면 강조색
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = `rgba(${255 - p.accent}, ${Math.round(255 - 201 * p.accent)}, ${Math.round(255 - 201 * p.accent)}, 0.9)`;
+        ctx.stroke();
+        // 위쪽 반사광 (유리 느낌)
+        if (p.r > 6) {
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r - 2.5, Math.PI * 1.15, Math.PI * 1.85);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
     }
 
     // ---------- 틀 안에 불똥이가 있는지 ----------
@@ -630,7 +704,9 @@
         this.hopRate = 7 + Math.random() * 3;
         this.age = 0;
         this.turnIn = 1 + Math.random() * 2;
-        this.held = false;
+        this.holder = null;      // 이 불똥이를 집고 있는 손 (없으면 null)
+        this.hovered = false;    // 손가락이 위에 있어서 잡을 수 있는 상태
+        this.hover = 0;          // hover 강조 애니메이션 (0~1)
         this.swing = 0;
         this.fallV = 0;
         // 바라보는 방향: 1 = 원래 모습(오른쪽으로 갈 때), -1 = 좌우 반전(왼쪽으로 갈 때)
@@ -640,9 +716,11 @@
 
       update(dt) {
         this.age += dt;
+        this.hover += ((this.hovered ? 1 : 0) - this.hover) * (reduceMotion ? 1 : Math.min(1, dt * 12));
         if (this.held) {
           // 집혀 있는 동안: 손을 따라가며 대롱대롱
-          const tx = pinch.x + pinch.offX, ty = pinch.y + pinch.offY;
+          const h = this.holder;
+          const tx = h.x + h.offX, ty = h.y + h.offY;
           this.swing = (this.swing || 0) * 0.85 + (tx - this.x) * 0.004;
           this.x = tx; this.y = ty;
           this.hop += dt * 4;
@@ -687,6 +765,8 @@
         if (go && prev > 0 && Math.sin(this.hop) <= 0) spark(this.x, this.y, 6);
       }
 
+      get held() { return !!this.holder; }
+
       liftTime() { return reduceMotion ? 0 : ENTER_LIFT_S; }
 
       draw() {
@@ -718,7 +798,8 @@
         }
 
         // 불똥이는 정면을 보고 있으니 좌우 반전 대신 가는 방향으로 살짝 기울임
-        const grabbed = this.held ? 1.1 : 1;
+        // 잡을 수 있을 때 살짝 들리고(hover), 집으면 더 커짐 — visionOS의 들어 올림 느낌
+        const grabbed = this.held ? 1.1 : 1 + 0.05 * this.hover;
         const tilt = this.held ? -(this.swing || 0) : this.vx * 0.12 + Math.sin(this.hop * 2) * 0.05 - (this.swing || 0);
         ctx.save();
         ctx.translate(this.x, this.y - lift);
@@ -726,10 +807,12 @@
         // 돌아서는 중간엔 너무 납작해지지 않게 최소 폭을 둠
         const faceX = Math.sign(this.face || 1) * Math.max(0.12, Math.abs(this.face));
         ctx.scale(size * squash * grabbed * faceX, size / squash * grabbed);
-        if (depth > 0) {   // 떠오른 만큼 아래로 부드러운 그림자
-          ctx.shadowColor = `rgba(0, 0, 0, ${0.45 * depth})`;
-          ctx.shadowBlur = 30 * depth;
-          ctx.shadowOffsetY = 14 * depth;
+        // 떠오른 만큼 아래로 부드러운 그림자 (등장할 때, 잡을 수 있을 때, 집혀 있을 때)
+        const lifted = Math.max(depth, this.held ? 1 : this.hover * 0.6);
+        if (lifted > 0.01) {
+          ctx.shadowColor = `rgba(0, 0, 0, ${0.45 * lifted})`;
+          ctx.shadowBlur = 30 * lifted;
+          ctx.shadowOffsetY = 14 * lifted;
         }
         ctx.drawImage(this.img, -this.w / 2, -this.h, this.w, this.h);
         ctx.restore();
@@ -767,7 +850,11 @@
       const g = guideBox();
       // 틀 안의 불똥이가 살짝 떠올랐다가 화면으로 튀어나옴 (불꽃은 떠오른 뒤 Sprite가 터뜨림)
       sprites.push(new Sprite(cutout(), g.x + g.w / 2, g.y + g.h, g.h));
-      if (sprites.length > MAX_SPRITES) sprites.shift();
+      // 너무 많으면 가장 오래된 것부터 정리 (누가 손에 들고 있는 건 빼고)
+      if (sprites.length > MAX_SPRITES) {
+        const i = sprites.findIndex(s => !s.held);
+        if (i >= 0) sprites.splice(i, 1);
+      }
       blink = 1;
       // 유리는 부드럽게 풀리며 틀이 닫히고 깨끗한 화면으로 (다음 불똥이는 다시 Space)
       setGuide(false);
@@ -1237,10 +1324,11 @@
       if (debug) drawDebug();
 
       updateHands(now, dt);
+      updateHover();
       // 집고 있는 불똥이는 맨 앞에
       sprites.sort((a, b) => (a.held - b.held) || (a.y - b.y));
       for (const s of sprites) { s.update(dt); s.draw(); }
-      drawPinchCursor();
+      drawPinchCursors(dt);
 
       for (const p of particles) {
         p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 400 * dt; p.life -= dt * 1.6;
@@ -1306,7 +1394,7 @@
     }
 
     document.getElementById('btnCapture').onclick = () => setGuide(!guideOn);
-    function clearSprites() { sprites = []; pinch.sprite = null; }
+    function clearSprites() { sprites = []; for (const p of pinches) p.sprite = null; }
     document.getElementById('btnClear').onclick = clearSprites;
     document.getElementById('btnClean').onclick = toggleUI;
     // 마우스로 누른 버튼에 포커스가 남으면 Space가 그 버튼을 또 눌러서 풀어줌
