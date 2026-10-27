@@ -155,7 +155,11 @@
     const MARGIN = 0.15;         // 틀 바깥으로 얼마나 더 보고 판단할지 (틀 크기 비율)
     const COVER_OK = 0.8;        // 틀 안이 불똥이로 이만큼 차 있어야 함
     const SPILL_MAX = 0.4;       // 틀 밖으로 삐져나온 부분은 이만큼까지만 (배경·벽이 통째로 잡히는 것 거르기)
-    const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 캡처 (약 1초)
+    const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 "인식됨"
+    const CAPTURE_DELAY_MS = 500; // 인식된 뒤 실제로 찍기까지 기다리는 시간
+    const SCAN_FROST = 2.2;      // 스캔 중 유리가 더 흐려지는 정도
+    const SCAN_DIM = 0.2;        // 스캔 중 유리가 더 어두워지는 정도
+    const SCAN_REFRACT = 0.6;    // 스캔 중 가장자리 굴절이 커지는 비율
     // 리퀴드 글라스 (WebGL) — HIG: 사진·영상 위에는 투명한 clear 변형
     const GLASS_BEVEL = 0.05;    // 구멍 가장자리 둥근 경사면 폭 (틀 키 비율)
     const GLASS_REFRACT_PX = 16; // 경사면에서 뒤 화면이 휘는 정도 (px)
@@ -201,6 +205,8 @@
     let missCount = 0;
     let flash = 0;
     let glow = 0;                // 유리 가장자리 주황빛 (0~1)
+    let scan = 0;                // 스캔 중 유리가 짙어진 정도 (0~1, 서서히 변함)
+    let readyAt = 0;             // 인식이 안정된 시각 (0 = 아직)
 
     // HIG 접근성 설정 존중
     const mqMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -534,6 +540,7 @@
     // Space: 틀 띄우기 / 숨기기 (틀이 떠 있을 때만 인식)
     function setGuide(on) {
       guideOn = on;
+      readyAt = 0;
       armed = true;
       stableCount = 0;
       missCount = 0;
@@ -702,12 +709,17 @@
           } else if (++missCount >= 3) {
             inside = false;
             stableCount = 0;
+            readyAt = 0;
             if (!armed) { armed = true; status.textContent = '불똥이를 틀에 맞춰주세요'; }
           }
 
           if (armed && inside) {
             status.textContent = '좋아요! 그대로 잠깐만...';
-            if (stableCount >= STABLE_NEEDED) capture();
+            // 인식이 안정된 뒤에도 잠깐(CAPTURE_DELAY_MS) 기다렸다가 찍음 → 그동안 유리가 서서히 짙어짐
+            if (stableCount >= STABLE_NEEDED) {
+              if (!readyAt) readyAt = performance.now();
+              if (performance.now() - readyAt >= CAPTURE_DELAY_MS) capture();
+            }
           }
         }
         await new Promise(r => setTimeout(r, 80));
@@ -753,6 +765,8 @@
       uniform float uRange, uTime, uAmount, uGlow;
       uniform float uBevel, uRefract, uFrost, uMag;
       uniform float uDim, uMotion;  // 밝은 배경일 때 어둡게 하는 막 (최대 0.35), 움직임 on/off
+      uniform float uScan;          // 불똥이를 스캔하는 동안 유리가 짙어지는 정도 (0~1)
+      uniform float uScanFrost, uScanDim, uScanRefract;
       uniform vec2 uLight;          // 빛이 오는 방향 (포인터를 따라 살짝 움직임)
 
       // 화면 좌표 → 영상 텍스처 좌표 (거울 + 화면 채우기)
@@ -797,8 +811,8 @@
         // 굴절: 판 전체는 살짝 확대, 경사면에서는 구멍 쪽으로 크게 휨 (빨강/초록/파랑 조금씩 다르게)
         vec2 center = uRes * 0.5;
         vec2 p = center + (px - center) / uMag;
-        vec2 off = -n * slope * uRefract * open;
-        float lod = uFrost * (0.6 + 0.4 * t);           // 가장자리는 덜 흐리게
+        vec2 off = -n * slope * uRefract * open * (1.0 + uScan * uScanRefract);
+        float lod = uFrost * (0.6 + 0.4 * t) + uScan * uScanFrost;   // 가장자리는 덜 흐리게, 스캔 중엔 더 흐리게
         vec3 col;
         col.r = textureLod(uVideo, videoUv(p + off * 1.00), lod).r;
         col.g = textureLod(uVideo, videoUv(p + off * 1.12), lod).g;
@@ -810,7 +824,7 @@
         float l = dot(col, vec3(0.299, 0.587, 0.114));
         col = mix(vec3(l), col, 1.12);
         // 밝은 배경 위에서는 어둡게 하는 막 (HIG: 최대 35%)
-        col *= 1.0 - uDim;
+        col *= 1.0 - min(0.6, uDim + uScan * uScanDim);
 
         // 빛 반사(specular): 가장자리에만 가늘고 또렷하게, 빛 쪽과 반대쪽 두 군데
         vec2 L = normalize(uLight);
@@ -918,7 +932,7 @@
 
       const U = {};
       for (const n of ['uVideo', 'uSdf', 'uRes', 'uVideoSize', 'uCover', 'uBox', 'uSdfRect', 'uRange',
-        'uTime', 'uAmount', 'uGlow', 'uBevel', 'uRefract', 'uFrost', 'uMag', 'uDim', 'uMotion', 'uLight']) U[n] = gl.getUniformLocation(prog, n);
+        'uTime', 'uAmount', 'uGlow', 'uBevel', 'uRefract', 'uFrost', 'uMag', 'uDim', 'uMotion', 'uLight', 'uScan', 'uScanFrost', 'uScanDim', 'uScanRefract']) U[n] = gl.getUniformLocation(prog, n);
 
       const makeTex = (unit) => {
         const t = gl.createTexture();
@@ -941,7 +955,7 @@
 
       return {
         canvas,
-        render(g, amount, glow, time) {
+        render(g, amount, glow, scanAmount, time) {
           if (!sdfRect) {
             const s = buildSdf(RANGE);
             gl.activeTexture(gl.TEXTURE1);
@@ -979,6 +993,10 @@
           gl.uniform1f(U.uDim, reduceTransparency ? 0.5 : bgDim);
           gl.uniform1f(U.uMotion, reduceMotion ? 0 : 1);
           gl.uniform2f(U.uLight, light.x, light.y);
+          gl.uniform1f(U.uScan, scanAmount);
+          gl.uniform1f(U.uScanFrost, SCAN_FROST);
+          gl.uniform1f(U.uScanDim, SCAN_DIM);
+          gl.uniform1f(U.uScanRefract, SCAN_REFRACT);
 
           gl.clearColor(0, 0, 0, 0);
           gl.clear(gl.COLOR_BUFFER_BIT);
@@ -1085,8 +1103,17 @@
       light.y += (lightTarget.y - light.y) * lk;
 
       // 불똥이가 틀에 맞춰질수록 유리 가장자리가 주황빛으로
-      const glowTarget = armed && inside ? Math.min(1, stableCount / STABLE_NEEDED) : 0;
+      // 스캔 진행도: 인식이 안정되기까지 40% + 찍기 전 기다림 60%
+      let scanTarget = 0;
+      if (armed && inside) {
+        const a = Math.min(1, stableCount / STABLE_NEEDED);
+        const b = readyAt ? Math.min(1, (performance.now() - readyAt) / CAPTURE_DELAY_MS) : 0;
+        scanTarget = a * 0.4 + b * 0.6;
+      }
+      const glowTarget = scanTarget;
       glow += (glowTarget - glow) * Math.min(1, dt * 8);
+      // 유리는 서서히 짙어지고(들어올 때), 빠지면 부드럽게 풀림 — '동작 줄이기'면 바로 바뀜
+      scan = reduceMotion ? scanTarget : scan + (scanTarget - scan) * Math.min(1, dt * (scanTarget > scan ? 4 : 6));
 
       const g = guideBox();
       const showGuide = guideSil.width && presence > 0.01;
@@ -1096,7 +1123,7 @@
         drawVideo(ctx, 0);
         if (showGuide && liquidGlass) {
           try {
-            ctx.drawImage(liquidGlass.render(g, Math.min(1, Math.max(0, pe)), glow, now / 1000), 0, 0, innerWidth, innerHeight);
+            ctx.drawImage(liquidGlass.render(g, Math.min(1, Math.max(0, pe)), glow, scan, now / 1000), 0, 0, innerWidth, innerHeight);
           } catch (e) {
             console.error('리퀴드 글라스 오류, 간단한 유리로 바꿀게요', e);
             liquidGlass = null;
