@@ -157,7 +157,10 @@
     const ENTER_SHRINK_S = 0.5;  // 떠오른 뒤 뛰어다니는 크기로 줄어드는 시간
     const TURN_S = 0.2;          // 방향 바꿀 때 돌아서는 시간
     const SHADOW_ALPHA = 0.32;   // 발밑 그림자 진하기
-    const EMBER_SCALE = 0.6;     // 불씨 개수 비율 (줄이면 더 차분)
+    const EMBER_SCALE = 0.8;     // 튀는 불꽃 개수 비율 (줄이면 더 차분)
+    const EMBER_RATE = 3.5;      // 불똥이 하나가 1초에 머리 위로 피워 올리는 불티 수
+    const LAND_SPARKS = 5;       // 착지할 때 튀는 불꽃 수 (EMBER_SCALE 적용 전)
+    const PARTICLE_MAX = 300;    // 화면 전체 불티·불꽃 최대 개수 (아이맥이 무거워지지 않게)
     const TURN_THRESHOLD = 0.2;  // 좌우 속도가 이보다 커야 돌아섬 (작은 흔들림엔 그대로)
     const LIFT_SCALE = 0.08;     // 떠오를 때 커지는 비율
     const LIFT_RAISE = 0.04;     // 떠오를 때 올라가는 높이 (틀 키 비율)
@@ -709,6 +712,15 @@
       update(dt) {
         this.age += dt;
         this.hover += ((this.hovered ? 1 : 0) - this.hover) * (reduceMotion ? 1 : Math.min(1, dt * 12));
+        // 머리 위 불꽃 끝에서 불티가 피어오름 (등장 연출이 끝난 뒤부터, 들고 있을 때도)
+        if (this.age > this.liftTime() + ENTER_SHRINK_S) {
+          this.emberT = (this.emberT ?? Math.random() / EMBER_RATE) - dt;
+          if (this.emberT <= 0) {
+            this.emberT = (0.5 + Math.random()) / EMBER_RATE;
+            const scale = this.held ? 1.1 : 1;
+            ember(this.x + (Math.random() - 0.5) * this.w * 0.12, this.y - (this.lastLift || 0) - this.h * 0.93 * scale);
+          }
+        }
         if (this.held) {
           // 집혀 있는 동안: 손을 따라가며 대롱대롱
           const h = this.holder;
@@ -754,7 +766,7 @@
         const prev = Math.sin(this.hop);
         this.hop += this.hopRate * dt;
         // 착지할 때마다 불똥 튀기기
-        if (go && prev > 0 && Math.sin(this.hop) <= 0) puff(this.x, this.y, this.w);
+        if (go && prev > 0 && Math.sin(this.hop) <= 0) { puff(this.x, this.y, this.w); spark(this.x, this.y - 4, LAND_SPARKS); }
       }
 
       get held() { return !!this.holder; }
@@ -786,6 +798,7 @@
 
         const s = this.held || entering ? 0 : Math.abs(Math.sin(this.hop));
         const lift = s * this.h * 0.18 + raise;
+        this.lastLift = lift;   // 불티가 지금 머리 위치에서 나오도록 기억
         const squash = this.held ? 1 / (1 + Math.sin(this.hop) * 0.04) : 1 + (entering ? 0 : (1 - s) * 0.08);
 
         // 불똥이는 정면을 보고 있으니 좌우 반전 대신 가는 방향으로 살짝 기울임
@@ -833,24 +846,47 @@
       particles.push({ kind: 'puff', x, y, w, life: 1 });
     }
 
-    // 특별한 순간(튀어나올 때, 집을 때)만 작은 불씨가 살짝 떠올랐다 사라짐 — 강조색, 개수 적게
+    // 불티: 불꽃 끝에서 천천히 떠오르며 흔들리다 꺼짐 (하양-노랑 → 주황 → 빨강)
+    function ember(x, y) {
+      if (reduceMotion || particles.length > PARTICLE_MAX) return;
+      particles.push({
+        kind: 'ember', x, y, vx: (Math.random() - 0.5) * 30, vy: -(50 + Math.random() * 60),
+        life: 1, dur: 0.9 + Math.random() * 0.6, r: 1.8 + Math.random() * 1.8, wob: Math.random() * 6.28
+      });
+    }
+
+    // 불꽃 튐: 짧은 빛줄기가 사방으로 탁 튀고 중력에 떨어지며 꺼짐 (착지, 튀어나올 때, 집을 때)
     function spark(x, y, count) {
       if (reduceMotion) return;
-      for (let i = 0; i < Math.round(count * EMBER_SCALE); i++) {
-        const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.2;
-        const v = 40 + Math.random() * 70;
-        particles.push({ kind: 'ember', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, r: 1.5 + Math.random() * 2 });
+      const n = Math.round(count * EMBER_SCALE);
+      for (let i = 0; i < n && particles.length < PARTICLE_MAX; i++) {
+        const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.6;
+        const v = 120 + Math.random() * 180;
+        particles.push({ kind: 'spark', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, dur: 0.35 + Math.random() * 0.25 });
       }
     }
 
     function updateParticles(dt) {
       for (const p of particles) {
         if (p.kind === 'puff') { p.life -= dt / 0.45; continue; }
-        p.x += p.vx * dt; p.y += p.vy * dt;
-        p.vx *= 1 - dt * 2; p.vy = p.vy * (1 - dt * 2) - 20 * dt;   // 공기 저항 + 살짝 떠오름
-        p.life -= dt / 0.7;
+        if (p.kind === 'ember') {
+          p.wob += dt * 5;
+          p.x += (p.vx + Math.sin(p.wob) * 18) * dt;   // 아지랑이처럼 좌우로 흔들
+          p.y += p.vy * dt;
+          p.vy *= 1 - dt * 0.6;
+        } else {
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vx *= 1 - dt * 1.5; p.vy += 520 * dt;      // 공기 저항 + 중력
+        }
+        p.life -= dt / p.dur;
       }
       particles = particles.filter(p => p.life > 0);
+    }
+
+    // 불 온도 색: 막 튀었을 땐 하양-노랑, 식을수록 주황 → 빨강(#FE3636)
+    function fireColor(t, a) {
+      const r = 255, g = Math.round(54 + 186 * Math.pow(t, 1.4)), b = Math.round(54 + 140 * Math.pow(t, 3));
+      return `rgba(${r}, ${g}, ${b}, ${a})`;
     }
 
     // 바닥 층: 먼지
@@ -862,19 +898,32 @@
       }
     }
 
-    // 위 층: 불씨 (은은한 빛)
+    // 위 층: 불티·불꽃 (은은하게 빛나며 겹치면 밝아짐)
     function drawEmbers() {
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
+      ctx.lineCap = 'round';
       for (const p of particles) {
-        if (p.kind !== 'ember') continue;
-        const a = p.life * p.life;
-        ctx.shadowColor = `rgba(254, 54, 54, ${a})`;
+        if (p.kind === 'puff') continue;
+        const t = p.life, a = Math.min(1, t * 1.6) * (p.kind === 'ember' ? 0.9 : 1);
+        // 불티는 꺼지기 직전 살짝 깜빡임
+        const flick = p.kind === 'ember' && t < 0.35 ? 0.6 + 0.4 * Math.sin(p.wob * 3) : 1;
+        ctx.shadowColor = fireColor(t * 0.6, a * 0.8);
         ctx.shadowBlur = 8;
-        ctx.fillStyle = `rgba(255, ${Math.round(120 + 80 * p.life)}, ${Math.round(90 + 60 * p.life)}, ${a})`;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.r * (0.6 + 0.4 * p.life), 0, Math.PI * 2);
-        ctx.fill();
+        if (p.kind === 'spark') {
+          // 움직이는 방향으로 짧은 빛줄기
+          ctx.strokeStyle = fireColor(t, a);
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          ctx.moveTo(p.x, p.y);
+          ctx.lineTo(p.x - p.vx * 0.035, p.y - p.vy * 0.035);
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = fireColor(t, a * flick);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r * (0.5 + 0.5 * t), 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
       ctx.restore();
     }
