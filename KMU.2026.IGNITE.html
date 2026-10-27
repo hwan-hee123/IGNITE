@@ -1,0 +1,1739 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IGNITE</title>
+  <script>
+    // 최신 버전을 받으려고 붙인 ?v=... 를 주소창에서 지워 깔끔한 주소만 보이게
+    if (location.search) history.replaceState(null, '', location.pathname);
+  </script>
+  <!-- 애플 기기(아이맥)는 시스템 폰트 SF Pro를 그대로 쓰고, 그 외(Windows 등)는 SF Pro와 비슷한 Pretendard로 -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+  <style>
+    /* Apple HIG 기준
+       - 컨트롤은 콘텐츠(카메라) 위에 떠 있는 Liquid Glass 한 겹 (글래스 위에 글래스 겹치지 않기)
+       - 글자가 있는 툴바·상태 표시는 regular 변형 (흐림 + 밝기 조정으로 가독성)
+       - 캡슐 모양, 누르는 영역 최소 44pt, 강조(tint)는 주요 버튼 하나만
+       - 투명도 줄이기 / 대비 높이기 / 동작 줄이기 설정 존중 */
+    :root {
+      --label: rgba(255, 255, 255, 0.95);
+      --label-2: rgba(255, 255, 255, 0.7);
+      --fill: rgba(255, 255, 255, 0.12);
+      --fill-press: rgba(255, 255, 255, 0.2);
+      --tint: #FE3636;               /* 앱 전체 강조색 하나 (틀 네온과 같은 색) */
+      --lx: 30%;                     /* 반사광 위치 (포인터를 따라 살짝 움직임) */
+      --ly: 0%;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    body {
+      color: var(--label);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Apple SD Gothic Neo", "Pretendard Variable", Pretendard, "Malgun Gothic", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    #stage { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+    #video { position: fixed; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+
+    /* Liquid Glass (regular) */
+    .glass {
+      position: fixed; left: 50%; transform: translateX(-50%);
+      border-radius: 999px;
+      background: rgba(30, 30, 32, 0.32);
+      -webkit-backdrop-filter: blur(22px) saturate(180%) brightness(1.04);
+      backdrop-filter: blur(22px) saturate(180%) brightness(1.04);
+      box-shadow:
+        inset 0 1px 0.5px rgba(255, 255, 255, 0.5),      /* 위쪽 가장자리 반사 */
+        inset 0 -1px 0.5px rgba(255, 255, 255, 0.12),    /* 아래쪽 가장자리 */
+        inset 0 0 0 0.5px rgba(255, 255, 255, 0.22),     /* 유리 테두리 */
+        0 10px 30px rgba(0, 0, 0, 0.28);                  /* 떠 있는 그림자 */
+      transition: opacity 0.35s ease, transform 0.45s cubic-bezier(0.2, 1.2, 0.3, 1);
+    }
+    .glass::before {                 /* 표면 반사광 */
+      content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+      background: radial-gradient(120% 160% at var(--lx) var(--ly), rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0) 55%);
+      mix-blend-mode: screen;
+    }
+
+    #status {
+      top: max(16px, env(safe-area-inset-top));
+      padding: 10px 18px;
+      font-size: 15px; font-weight: 590; letter-spacing: -0.01em;
+      white-space: nowrap; max-width: calc(100vw - 32px); overflow: hidden; text-overflow: ellipsis;
+    }
+
+    #ui {
+      bottom: max(20px, env(safe-area-inset-bottom));
+      display: flex; gap: 4px; align-items: center;
+      padding: 6px;
+      max-width: calc(100vw - 32px);
+    }
+    #ui button {
+      position: relative;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      min-width: 44px; height: 44px; padding: 0 14px;
+      border: 0; border-radius: 999px;
+      background: transparent; color: var(--label);
+      font: inherit; font-size: 15px; font-weight: 590; letter-spacing: -0.01em;
+      cursor: pointer; white-space: nowrap;
+      transition: background 0.2s ease, transform 0.25s cubic-bezier(0.2, 1.4, 0.4, 1);
+    }
+    #ui button:hover { background: var(--fill); }
+    #ui button:active { background: var(--fill-press); transform: scale(0.94); }
+    #ui button:focus-visible { outline: 2px solid var(--tint); outline-offset: 2px; }
+    #ui svg { width: 20px; height: 20px; flex: none; }
+
+    /* 주요 버튼 하나만 색으로 강조 (glass prominent) */
+    #ui button.primary {
+      background: rgba(254, 54, 54, 0.88); color: #fff;
+      box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 0.55), inset 0 0 0 0.5px rgba(255, 255, 255, 0.25);
+      padding: 0 18px;
+    }
+    #ui button.primary:hover { background: rgba(255, 82, 82, 0.92); }
+    #ui button.primary.on { background: rgba(255, 255, 255, 0.92); color: #1c1c1e; }
+
+
+    /* 좁은 화면: 아이콘만 */
+    @media (max-width: 640px) {
+      #ui .txt { display: none; }
+      #ui button { padding: 0 12px; }
+    }
+
+    body.clean .glass { opacity: 0; pointer-events: none; transform: translateX(-50%) scale(0.92); }
+
+    /* 스캔 중 안내 문구: Face ID 설정 화면처럼 틀 아래 크고 짧게 (위쪽 작은 캡슐은 숨김) */
+    #caption {
+      position: fixed; left: 50%; transform: translate(-50%, 6px);
+      max-width: calc(100vw - 32px); text-align: center; pointer-events: none;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Apple SD Gothic Neo", "Pretendard Variable", Pretendard, "Malgun Gothic", sans-serif;
+      font-size: 20px; font-weight: 600; letter-spacing: -0.01em;   /* HIG Title 3 크기 */
+      color: rgba(255, 255, 255, 0.96); text-shadow: 0 1px 12px rgba(0, 0, 0, 0.35);
+      opacity: 0; transition: opacity 0.35s ease, transform 0.45s cubic-bezier(0.2, 1, 0.3, 1);
+    }
+    body.scanning #caption { opacity: 1; transform: translate(-50%, 0); }
+    body.scanning #status { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+    @media (prefers-reduced-motion: reduce) { #caption { transition: none; } }
+    .t { display: inline-block; }   /* 글자 바뀔 때 살짝 위아래로 움직이는 전환용 */
+
+    /* 접근성: 투명도 줄이기 / 대비 높이기 */
+    @media (prefers-reduced-transparency: reduce) {
+      .glass { background: rgba(30, 30, 32, 0.94); -webkit-backdrop-filter: none; backdrop-filter: none; }
+      .glass::before { display: none; }
+    }
+    @media (prefers-contrast: more) {
+      .glass { background: rgba(0, 0, 0, 0.8); box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.85); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .glass, #ui button { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="stage"></canvas>
+  <div id="status" class="glass" role="status" aria-live="polite">카메라 연결 중...</div>
+  <div id="caption" aria-hidden="true"></div>
+  <div id="ui" class="glass" role="toolbar" aria-label="포토부스">
+    <!-- 카메라는 자동으로 내장 카메라를 고름 (선택 목록은 화면에 안 보이게 남겨 둠) -->
+    <select id="camSelect" aria-hidden="true" tabindex="-1" hidden></select>
+    <button id="btnCapture" class="primary" title="Space">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3c2.5 3 5.5 5.5 5.5 10a5.5 5.5 0 0 1-11 0c0-2 .8-3.6 2-5 .3 1.6 1.1 2.6 2 3-.4-3 .3-5.6 1.5-8z"/></svg>
+      <span class="txt">틀 띄우기</span>
+    </button>
+    <!-- 모두 지우기는 진행자용 X 키로만 (방문객이 실수로 누르지 않게 버튼은 없음) -->
+  </div>
+
+  <script type="module">
+    import { FilesetResolver, InteractiveSegmenter, HandLandmarker }
+      from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+
+    // 휴대폰/가상 카메라로 잡히는 장치 이름 (노트북 카메라만 쓰기 위해 제외)
+    const EXCLUDE = /iphone|android|phone|continuity|link|droidcam|iriun|epoccam|virtual|obs|camo/i;
+
+    const MAX_SPRITES = 10;      // 화면에 동시에 뛰어다니는 불똥이 수
+    const GUIDE_H = 0.55;        // 화면에 보이는 불똥이 틀의 키 (화면 높이 비율)
+    const GUIDE_COLOR = '#FE3636';               // 불똥이 틀 테두리 색
+    // 스캔 장면 (Face ID 등록 화면 참고)
+    const SCAN_LINE_W = 2.5;     // 윤곽선 굵기 (px)
+    const SCAN_LINE_W_BOLD = 4;  // '대비 높이기' 설정일 때 윤곽선 굵기
+    // WebGL이 안 될 때 쓰는 간단한 유리의 테두리
+    const GUIDE_STROKE = 3;      // 선 굵기 (px)
+    const GUIDE_STROKE_BOLD = 5; // '대비 높이기' 설정일 때 선 굵기
+    const NEON_GLOW = [[28, 0.9], [12, 0.9], [4, 1]];   // 빛 퍼짐 [흐림 px, 세기]
+    const GLOW_PAD = 60;         // 빛이 퍼질 여백 (px)
+    const WORK_W = 200;          // 인식용 축소 해상도 (가로)
+    const MARGIN = 0.15;         // 틀 바깥으로 얼마나 더 보고 판단할지 (틀 크기 비율)
+    const COVER_OK = 0.8;        // 틀 안이 불똥이로 이만큼 차 있어야 함
+    const SPILL_MAX = 0.4;       // 틀 밖으로 삐져나온 부분은 이만큼까지만 (배경·벽이 통째로 잡히는 것 거르기)
+    const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 "인식됨"
+    const CAPTURE_DELAY_MS = 500; // 인식된 뒤 실제로 찍기까지 기다리는 시간
+    // 스캔 진행은 유리가 아니라 틀 색이 아래→위로 차오르는 걸로 보여줌 (유리는 그대로)
+    const SCAN_FROST = 0;        // 스캔 중 유리가 더 흐려지는 정도
+    const SCAN_DIM = 0;          // 스캔 중 유리가 더 어두워지는 정도
+    const SCAN_REFRACT = 0;      // 스캔 중 가장자리 굴절이 커지는 비율
+    const FILL_FEATHER = 14;     // 차오르는 색 경계의 부드러운 폭 (px)
+    // 찍히는 순간
+    const ENTER_LIFT_S = 0.3;    // 틀 안 불똥이가 떠오르는 시간
+    const ENTER_SHRINK_S = 0.5;  // 떠오른 뒤 뛰어다니는 크기로 줄어드는 시간
+    const TURN_S = 0.2;          // 방향 바꿀 때 돌아서는 시간
+    const SHADOW_ALPHA = 0.32;   // 발밑 그림자 진하기
+    const EMBER_SCALE = 0.8;     // 튀는 불꽃 개수 비율 (줄이면 더 차분)
+    const EMBER_RATE = 3.5;      // 불똥이 하나가 1초에 머리 위로 피워 올리는 불티 수
+    const LAND_SPARKS = 5;       // 착지할 때 튀는 불꽃 수 (EMBER_SCALE 적용 전)
+    const PARTICLE_MAX = 300;    // 화면 전체 불티·불꽃 최대 개수 (아이맥이 무거워지지 않게)
+    const THROW_SPEED = 1100;    // 손을 이보다 빠르게(px/초) 휙 놓으면 "던짐" → 화면 밖으로 날아감
+    const THROW_GRAVITY = 1400;  // 던진 뒤 떨어지는 힘 (px/초²)
+    const SMOKE_PUFFS = 9;       // 불이 꺼질 때 피어오르는 연기 덩어리 수
+    const SMOKE_ALPHA = 0.32;    // 연기 진하기
+    const FIZZLE_S = 0.6;        // 불이 꺼지며 사라지는 시간
+    const CLEAR_STAGGER_S = 0.06; // 모두 지울 때 하나씩 꺼지는 간격
+    const OVERFLOW_STAGGER_S = 0.3; // 10마리 넘을 때 오래된 것부터 꺼지는 간격
+    const AUTO_CLOSE_MS = 5000;  // 틀을 띄우고 불똥이가 인식되지 않으면 닫히는 시간
+    const AUTO_CLOSE_FADE_MS = 1000; // 닫히기 전 윤곽선이 옅어지는 시간
+    const TURN_THRESHOLD = 0.2;  // 좌우 속도가 이보다 커야 돌아섬 (작은 흔들림엔 그대로)
+    const LIFT_SCALE = 0.08;     // 떠오를 때 커지는 비율
+    const LIFT_RAISE = 0.04;     // 떠오를 때 올라가는 높이 (틀 키 비율)
+    const BLINK_MS = 140;        // 셔터처럼 살짝 어두워지는 시간
+    const BLINK_DARK = 0.25;     // 그때 어두워지는 정도
+    const RELEASE_S = 0.45;      // 찍힌 뒤 유리가 풀리며 사라지는 시간
+    // 틀 밖 배경 (WebGL) — 밝기는 그대로 두고 젖빛 유리처럼 흐리게: 또렷한 틀 안에 시선이 모이게
+    const GLASS_BEVEL = 0.04;    // 구멍 가장자리 둥근 경사면 폭 (틀 키 비율)
+    const GLASS_REFRACT_PX = 0;  // 경사면에서 뒤 화면이 휘는 정도 (0 = 안 휨, 밝은 배경이 틀 밖으로 번지지 않게)
+    const GLASS_RIM = 0;         // 틀 가장자리 유리 반사광 (0 = 없음, 흰 윤곽선만)
+    const GLASS_BLUR_PX = 34;    // 흐림 반경 (px, 클수록 더 뿌옇게)
+    const GLASS_FROST = 2.0;     // 흐림 전 미리 살짝 뭉개는 정도 (흐림을 매끈하게)
+    const GLASS_FROST_SOLID = 3.0; // '투명도 줄이기' 설정일 때
+    const GLASS_SAT = 1.15;      // 채도 (색이 튀지 않게 거의 그대로)
+    const GLASS_TINT_DARK = 0.0; // 어두운 틴트 세기 (0 = 원래 밝기 그대로, 키우면 틀 밖이 어두워짐)
+    const GLASS_SHADOW = 0;      // 구멍 안 그림자 (0 = 없음, 틀 안을 깨끗하게)
+    const GLASS_MAG = 1.0;       // 유리 뒤 화면 확대 (1 = 확대 없음, 키우면 화면이 커져 보임)
+    const GLASS_DIM_MAX = 0.35;  // 밝은 배경일 때 어둡게 하는 막 (HIG 권장 35%)
+    // WebGL이 안 될 때 쓰는 간단한 유리
+    const GLASS_BLUR = 8;        // 흐림 정도 (px)
+    const GLASS_TINT = 0.14;     // 우윳빛 정도 (0~1)
+    const GLASS_REFRACT = 1.06;  // 확대돼 보이는 정도
+
+    const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
+    const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite';
+    const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+    const PINCH_ON = 0.35;       // 엄지-검지 거리가 손 크기의 이 비율보다 가까우면 "집음"
+    const PINCH_OFF = 0.5;       // 이보다 멀어지면 "놓음" (중간은 이전 상태 유지 → 덜 끊김)
+    const GRAB_RADIUS = 0.6;     // 불똥이 키의 이 비율 안에서 집으면 잡힘
+    const MAX_HANDS = 4;         // 동시에 인식하는 손 개수 (손마다 불똥이 하나씩 잡을 수 있음)
+    const CURSOR_R = 18;         // 핀치 커서 크기 (손가락을 벌렸을 때)
+    const CURSOR_R_PRESS = 9;    // 집었을 때 커서 크기
+
+    const video = document.getElementById('video');
+    const stage = document.getElementById('stage');
+    const ctx = stage.getContext('2d');
+    const statusEl = document.getElementById('status');
+
+    // 글자 바꾸기: 툭 바뀌지 않고, 이전 글자가 살짝 위로 사라지고 새 글자가 아래서 떠오름 ('동작 줄이기'면 바로)
+    function swapText(el, text) {
+      if (el._target === text) return;
+      el._target = text;
+      let span = el.querySelector(':scope > .t');
+      if (!span) {
+        const old = el.textContent;
+        el.textContent = '';
+        span = document.createElement('span');
+        span.className = 't';
+        span.textContent = old;
+        el.appendChild(span);
+      }
+      if (reduceMotion || !span.textContent || !span.animate) { span.textContent = text; return; }
+      if (el._anim) return;   // 바뀌는 중이면 끝날 때 가장 최신 글자로
+      el._anim = span.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-3px)' }],
+        { duration: 120, easing: 'ease-in', fill: 'forwards' });
+      el._anim.finished.then(() => {
+        span.textContent = el._target;
+        el._anim.cancel();
+        el._anim = null;
+        span.animate([{ opacity: 0, transform: 'translateY(3px)' }, { opacity: 1, transform: 'none' }],
+          { duration: 240, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' });
+      });
+    }
+    // 기존 코드의 status.textContent = '...' 를 그대로 쓰면서 바뀔 때마다 자연스럽게 전환
+    const status = {
+      get textContent() { return statusEl._target ?? statusEl.textContent; },
+      set textContent(v) { swapText(statusEl, v); }
+    };
+    const caption = document.getElementById('caption');
+    const camSelect = document.getElementById('camSelect');
+
+    const work = document.createElement('canvas');
+    const wctx = work.getContext('2d', { willReadFrequently: true });
+
+    let segmenter = null;
+    let hands = null;
+    let lastHandTime = -1;
+    // 핀치 커서 (화면 좌표). sprite = 지금 집고 있는 불똥이
+    // 손마다 핀치 커서 하나 (최대 MAX_HANDS개). sprite = 그 손이 집고 있는 불똥이
+    const pinches = Array.from({ length: MAX_HANDS }, () => ({
+      visible: false, seen: false, miss: 0, down: false, x: 0, y: 0, vx: 0, vy: 0, gap: 1,
+      sprite: null, offX: 0, offY: 0, hover: null,
+      alpha: 0, r: CURSOR_R, press: 0, accent: 0       // 커서 애니메이션 상태
+    }));
+    let sprites = [];
+    let particles = [];
+    let showUI = true;
+    let debug = false;
+    let lastInfo = null;         // 디버그용 { mask, cover, spill }
+    let inside = false;          // 지금 틀 안에 불똥이가 들어와 있는지
+    let stableCount = 0;
+    let armed = true;            // 불똥이를 틀에서 뺐다가 다시 넣어야 다음 인식
+    let missCount = 0;
+    let blink = 0;               // 찍힘 신호 진행 (1 → 0)
+    let closeFade = 1;           // 틀 자동 닫기 직전 옅어짐 (1 → 0)
+    let glow = 0;                // 유리 가장자리 주황빛 (0~1)
+    let scan = 0;                // 스캔 중 유리가 짙어진 정도 (0~1, 서서히 변함)
+    let readyAt = 0;             // 인식이 안정된 시각 (0 = 아직)
+
+    // HIG 접근성 설정 존중
+    const mqMotion = matchMedia('(prefers-reduced-motion: reduce)');
+    const mqTransp = matchMedia('(prefers-reduced-transparency: reduce)');
+    const mqContrast = matchMedia('(prefers-contrast: more)');
+    let reduceMotion = mqMotion.matches, reduceTransparency = mqTransp.matches, highContrast = mqContrast.matches;
+    mqMotion.addEventListener?.('change', e => { reduceMotion = e.matches; });
+    mqTransp.addEventListener?.('change', e => { reduceTransparency = e.matches; });
+    mqContrast.addEventListener?.('change', e => { highContrast = e.matches; });
+
+    // 빛 방향: 기본은 왼쪽 위, 포인터(마우스)를 따라 살짝 움직임 → 유리 반사광이 반응
+    const light = { x: -0.7, y: -0.7 };
+    const lightTarget = { x: -0.7, y: -0.7 };
+    addEventListener('pointermove', e => {
+      const nx = e.clientX / innerWidth - 0.5, ny = e.clientY / innerHeight - 0.5;
+      lightTarget.x = -0.7 + nx * 0.8;
+      lightTarget.y = -0.7 + ny * 0.8;
+      document.documentElement.style.setProperty('--lx', (30 + nx * 40).toFixed(1) + '%');
+      document.documentElement.style.setProperty('--ly', (ny * 40).toFixed(1) + '%');
+    });
+
+    // 배경 밝기에 따라 어둡게 하는 막 (밝을수록 최대 35%)
+    let bgDim = 0;
+    let bgLum = 0;               // 카메라 화면 평균 밝기 (0~1)
+    const lum = document.createElement('canvas');
+    lum.width = 16; lum.height = 9;
+    const lumc = lum.getContext('2d', { willReadFrequently: true });
+    let lumTick = 0;
+    function updateBgDim() {
+      if (++lumTick % 15 || !video.videoWidth) return;
+      lumc.drawImage(video, 0, 0, 16, 9);
+      const d = lumc.getImageData(0, 0, 16, 9).data;
+      let s = 0;
+      for (let i = 0; i < d.length; i += 4) s += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      const avg = s / (d.length / 4) / 255;
+      bgLum += (avg - bgLum) * 0.5;
+      const target = Math.min(1, Math.max(0, (avg - 0.4) / 0.3)) * GLASS_DIM_MAX;
+      bgDim += (target - bgDim) * 0.5;
+    }
+    let presence = 0;            // 틀이 보이는 정도 (0~1)
+    let guideOn = false;         // Space로 틀을 띄웠는지
+
+    // ---------- 불똥이 실루엣 (틀) ----------
+
+    // silhouette = 영상 원본 기준 모양, guideSil = 화면(거울)에 보이는 틀 모양 (좌우반전)
+    const silhouette = new Image();
+    const guideSil = document.createElement('canvas');
+    silhouette.onload = () => {
+      guideSil.width = silhouette.width; guideSil.height = silhouette.height;
+      const g = guideSil.getContext('2d');
+      g.translate(guideSil.width, 0);
+      g.scale(-1, 1);
+      g.drawImage(silhouette, 0, 0);
+    };
+    silhouette.src = 'silhouette.png?v=' + Date.now();   // 바꾼 실루엣이 예전 것으로 보이지 않게 항상 새로 받음
+    const ASPECT = 0.763;        // 실루엣 가로/세로 비율
+
+    // 화면에 그리는 틀 위치
+    function guideBox() {
+      const h = innerHeight * GUIDE_H, w = h * ASPECT;
+      return { x: (innerWidth - w) / 2, y: innerHeight * 0.46 - h / 2, w, h };
+    }
+
+    // 틀(+여유)이 영상 원본(좌우반전 전)의 어느 부분인지
+    function guideInVideo(margin) {
+      const g = guideBox(), L = videoLayout();
+      const mx = g.w * margin, my = g.h * margin;
+      const xUnmirrored = innerWidth - (g.x - mx) - (g.w + mx * 2);
+      return {
+        x: (xUnmirrored - L.ox) / L.s,
+        y: (g.y - my - L.oy) / L.s,
+        w: (g.w + mx * 2) / L.s,
+        h: (g.h + my * 2) / L.s
+      };
+    }
+
+    // 실루엣 모양 그대로 반투명하게 + 테두리 (색이 바뀌며 진행 상황 표시)
+    const guideCache = { key: '', fill: null, ring: null, bold: null, glow: null };
+    function guideImages(w, h) {
+      const key = Math.round(w) + 'x' + Math.round(h);
+      if (guideCache.key === key) return guideCache;
+      const make = () => { const c = document.createElement('canvas'); c.width = Math.round(w) + 12; c.height = Math.round(h) + 12; return c; };
+      const fill = make(), ring = make();
+      const f = fill.getContext('2d');
+      f.drawImage(guideSil, 6, 6, w, h);
+      // 실루엣 바깥쪽으로 inner~outer px 떨어진 띠 (color 색)
+      const band = (canvas, inner, outer, color) => {
+        const c = canvas.getContext('2d');
+        for (let a = 0; a < Math.PI * 2; a += Math.PI / 12) c.drawImage(guideSil, 6 + Math.cos(a) * outer, 6 + Math.sin(a) * outer, w, h);
+        c.globalCompositeOperation = 'destination-out';
+        if (inner > 0) for (let a = 0; a < Math.PI * 2; a += Math.PI / 12) c.drawImage(guideSil, 6 + Math.cos(a) * inner, 6 + Math.sin(a) * inner, w, h);
+        else c.drawImage(guideSil, 6, 6, w, h);
+        c.globalCompositeOperation = 'source-in';
+        c.fillStyle = color;
+        c.fillRect(0, 0, canvas.width, canvas.height);
+      };
+      band(ring, 0, GUIDE_STROKE, GUIDE_COLOR);          // 선 하나 (깔끔하게)
+      // 스캔 윤곽선: 구멍과 같은 실루엣에서 바로 따서 가장자리와 정확히 겹침
+      const white = make(); band(white, 0, SCAN_LINE_W, '#fff');
+      const whiteBold = make(); band(whiteBold, 0, SCAN_LINE_W_BOLD, '#fff');
+      const accent = make(); band(accent, 0, SCAN_LINE_W, GUIDE_COLOR);
+      const accentBold = make(); band(accentBold, 0, SCAN_LINE_W_BOLD, GUIDE_COLOR);
+      const bold = make(); band(bold, 0, GUIDE_STROKE_BOLD, GUIDE_COLOR);   // '대비 높이기'용 두꺼운 선
+
+      // 은은한 빛: 틀 바깥으로만 퍼짐 (틀 안의 불똥이·사람 얼굴은 가리지 않게) — 한 번만 만들어 둠
+      const thick = make(); band(thick, 0, 8, GUIDE_COLOR);
+      const glow = document.createElement('canvas');
+      glow.width = thick.width + GLOW_PAD * 2; glow.height = thick.height + GLOW_PAD * 2;
+      const gc = glow.getContext('2d');
+      gc.shadowColor = GUIDE_COLOR;
+      gc.shadowOffsetX = 10000;
+      for (const [blur, a] of NEON_GLOW) {
+        gc.globalAlpha = a;
+        gc.shadowBlur = blur;
+        gc.drawImage(thick, GLOW_PAD - 10000, GLOW_PAD);
+      }
+      gc.shadowColor = 'transparent';
+      gc.globalAlpha = 1;
+      gc.globalCompositeOperation = 'destination-out';
+      gc.drawImage(guideSil, GLOW_PAD + 6, GLOW_PAD + 6, w, h);
+      Object.assign(guideCache, { key, fill, ring, bold, glow, white, whiteBold, accent, accentBold });
+      return guideCache;
+    }
+
+    // 인식용: work 크기에 맞춘 실루엣 (영상 원본 기준 모양)
+    const tplCache = { key: '', g: null, area: 0 };
+    function tplGrid(w, h) {
+      const key = w + 'x' + h;
+      if (tplCache.key === key) return tplCache;
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const cc = c.getContext('2d', { willReadFrequently: true });
+      const mx = w * MARGIN / (1 + MARGIN * 2), my = h * MARGIN / (1 + MARGIN * 2);
+      cc.drawImage(silhouette, mx, my, w - mx * 2, h - my * 2);
+      const d = cc.getImageData(0, 0, w, h).data;
+      const g = new Uint8Array(w * h);
+      let area = 0;
+      for (let i = 0; i < g.length; i++) if (d[i * 4 + 3] > 127) { g[i] = 1; area++; }
+      Object.assign(tplCache, { key, g, area });
+      return tplCache;
+    }
+
+    // ---------- 카메라 ----------
+
+    const CAMERA_ERRORS = {
+      NotAllowedError: '카메라 권한이 거부됐어요. 주소창 왼쪽 자물쇠 → 카메라 → 허용 후 새로고침해주세요',
+      NotFoundError: '카메라를 찾을 수 없어요',
+      NotReadableError: '다른 프로그램(줌, 카메라 앱 등)이 카메라를 쓰고 있어요. 닫고 새로고침해주세요',
+      OverconstrainedError: '선택한 카메라를 열 수 없어요'
+    };
+
+    async function openCamera(deviceId) {
+      if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+      const v = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+      if (deviceId) v.deviceId = { exact: deviceId };
+      const stream = await navigator.mediaDevices.getUserMedia({ video: v });
+      video.srcObject = stream;
+      await video.play();
+      return stream.getVideoTracks()[0];
+    }
+
+    async function startLaptopCamera() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        status.textContent = '이 브라우저에서는 카메라를 쓸 수 없어요 (https 주소로 열어주세요)';
+        return;
+      }
+      try {
+        // 장치 이름을 읽으려면 먼저 권한이 필요함 → 기본 카메라로 먼저 연다
+        let track = await openCamera();
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cams = devices.filter(d => d.kind === 'videoinput');
+        let saved = null;
+        try { saved = localStorage.getItem('camId'); } catch (e) {}
+        const pick = cams.find(d => d.deviceId === saved) || cams.find(d => !EXCLUDE.test(d.label)) || cams[0];
+
+        camSelect.innerHTML = '';
+        for (const c of cams) {
+          const o = document.createElement('option');
+          o.value = c.deviceId;
+          o.textContent = c.label || '카메라';
+          camSelect.appendChild(o);
+        }
+
+        if (pick && pick.deviceId !== track.getSettings().deviceId) {
+          try { track = await openCamera(pick.deviceId); }
+          catch (e) { track = await openCamera(); }   // 실패하면 기본 카메라 유지
+        }
+        camSelect.value = track.getSettings().deviceId;
+        if (segmenter) status.textContent = 'Space를 눌러 불똥이를 추가해보세요';
+      } catch (err) {
+        status.textContent = CAMERA_ERRORS[err.name] || ('카메라 오류: ' + err.name + ' ' + err.message);
+      }
+    }
+
+    camSelect.onchange = async () => {
+      try {
+        await openCamera(camSelect.value);
+        try { localStorage.setItem('camId', camSelect.value); } catch (e) {}
+      } catch (err) {
+        status.textContent = CAMERA_ERRORS[err.name] || ('카메라 오류: ' + err.name);
+      }
+    };
+
+    // ---------- AI 모델 ----------
+
+    async function loadModels() {
+      const vision = await FilesetResolver.forVisionTasks(WASM);
+      const make = (delegate) => InteractiveSegmenter.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+        outputCategoryMask: true, outputConfidenceMasks: false
+      });
+      try { segmenter = await make('GPU'); } catch (e) { segmenter = await make('CPU'); }
+
+      // 손 인식은 실패해도 사진 인식은 계속 되게 따로
+      const makeHands = (delegate) => HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: HAND_MODEL, delegate },
+        runningMode: 'VIDEO', numHands: MAX_HANDS
+      });
+      try { hands = await makeHands('GPU'); }
+      catch (e) {
+        try { hands = await makeHands('CPU'); } catch (e2) { console.error('손 인식을 불러오지 못했어요', e2); }
+      }
+    }
+
+    // ---------- 엄지·검지 핀치로 불똥이 잡기 ----------
+
+    // 영상 좌표(0~1) → 화면 좌표 (좌우반전)
+    function toScreen(p) {
+      const L = videoLayout();
+      return {
+        x: innerWidth - (p.x * video.videoWidth * L.s + L.ox),
+        y: p.y * video.videoHeight * L.s + L.oy
+      };
+    }
+
+    function updateHands(now, dt) {
+      // 불똥이 스캔 중(틀이 떠 있을 때)엔 손 제스처를 끔: 불똥이를 든 손이 커서로 잡히지 않게
+      // (HIG: 한 화면에서 서로 부딪히는 동작을 섞지 않기) — 잡고 있던 불똥이는 놓고, 커서는 부드럽게 사라짐
+      if (guideOn) {
+        for (const p of pinches) { if (p.down) pinchEnd(p); p.visible = false; }
+        return;
+      }
+      if (!hands || !video.videoWidth || video.currentTime === lastHandTime) return;
+      lastHandTime = video.currentTime;
+      let res;
+      try { res = hands.detectForVideo(video, now); } catch (e) { return; }
+
+      // 손마다: 엄지·검지 사이 위치, 손 크기(손목~가운데 손가락 뿌리) 대비 두 손가락 거리
+      const found = (res.landmarks || []).map(lm => {
+        const size = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 1;
+        const p = toScreen({ x: (lm[4].x + lm[8].x) / 2, y: (lm[4].y + lm[8].y) / 2 });
+        return { x: p.x, y: p.y, gap: Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) / size };
+      });
+
+      // 이번 프레임의 손을 지난 프레임의 같은 손과 짝지음 (가까운 것끼리) → 손마다 따로 집기
+      for (const p of pinches) p.seen = false;
+      for (const f of found) {
+        let best = null, bestD = Infinity;
+        for (const p of pinches) {
+          if (p.seen || !p.visible) continue;
+          const d = Math.hypot(p.x - f.x, p.y - f.y);
+          if (d < bestD) { best = p; bestD = d; }
+        }
+        if (!best || bestD > innerHeight * 0.25) best = pinches.find(p => !p.seen && !p.visible) || best;
+        if (best && !best.seen) trackHand(best, f, dt);
+      }
+      // 몇 프레임 연속으로 안 보이면 사라진 손 (잡고 있던 불똥이는 놓음)
+      for (const p of pinches) {
+        if (!p.seen && p.visible && ++p.miss > 4) { p.visible = false; if (p.down) pinchEnd(p); }
+      }
+    }
+
+    function trackHand(p, f, dt) {
+      p.seen = true;
+      p.miss = 0;
+      // 살짝 부드럽게 따라가기 (손 떨림 줄이기)
+      const k = p.visible ? 0.5 : 1;
+      const nx = p.x + (f.x - p.x) * k, ny = p.y + (f.y - p.y) * k;
+      if (dt > 0 && p.visible) {
+        p.vx = p.vx * 0.6 + ((nx - p.x) / dt) * 0.4;
+        p.vy = p.vy * 0.6 + ((ny - p.y) / dt) * 0.4;
+      } else { p.vx = 0; p.vy = 0; }
+      p.x = nx; p.y = ny;
+      p.gap = f.gap;
+      p.visible = true;
+      if (!p.down && f.gap < PINCH_ON) pinchStart(p);
+      else if (p.down && f.gap > PINCH_OFF) pinchEnd(p);
+    }
+
+    // 손가락 사이에서 가장 가까운, 아무도 안 잡은 불똥이
+    function grabbable(p) {
+      let best = null, bestD = Infinity;
+      for (const s of sprites) {
+        if (s.holder || s.thrown) continue;   // 이미 잡혔거나 날아가는 중이면 못 잡음
+        const d = Math.hypot(p.x - s.x, p.y - (s.y - s.h * 0.5));
+        if (d < s.h * GRAB_RADIUS && d < bestD) { best = s; bestD = d; }
+      }
+      return best;
+    }
+
+    function pinchStart(p) {
+      p.down = true;
+      const s = grabbable(p);
+      if (!s) return;
+      p.sprite = s;
+      p.offX = s.x - p.x;
+      p.offY = s.y - p.y;
+      s.holder = p;
+      spark(p.x, p.y, 10);
+    }
+
+    function pinchEnd(p) {
+      p.down = false;
+      const s = p.sprite;
+      if (!s) return;
+      s.holder = null;
+      const sp = Math.hypot(p.vx, p.vy);
+      if (sp > THROW_SPEED) {
+        // 세게 던지면: 그 속도 그대로 포물선을 그리며 날아가 화면 밖에서 불이 꺼짐
+        s.thrown = true;
+        s.tvx = p.vx; s.tvy = p.vy;
+        s.spinV = Math.max(-8, Math.min(8, p.vx * 0.004));
+      } else if (sp > 200) {
+        // 살짝 던지면: 그 방향으로 달려감
+        s.vx = p.vx / sp; s.vy = p.vy / sp; s.turnIn = 1.5;
+      }
+      s.fallV = 0;
+      p.sprite = null;
+    }
+
+    // 손가락이 불똥이 위에 있으면 "잡을 수 있음" 표시 (HIG: 상호작용 가능한 대상에 hover 피드백)
+    function updateHover() {
+      for (const s of sprites) s.hovered = false;
+      for (const p of pinches) {
+        p.hover = p.visible && !p.down ? grabbable(p) : null;
+        if (p.hover) p.hover.hovered = true;
+      }
+    }
+
+    // 핀치 커서 (iPad 포인터·visionOS 스타일)
+    //  - 평소: 반투명 유리 원 + 얇은 테두리, 위쪽에 반사광
+    //  - 손가락을 모을수록 원이 작아짐 → 집기 직전 피드백
+    //  - 불똥이 위: 테두리가 강조색으로, 원이 살짝 커짐
+    //  - 집으면: 작은 강조색 점으로 꽉 참
+    function drawPinchCursors(dt) {
+      const k = reduceMotion ? 1 : Math.min(1, dt * 14);
+      for (const p of pinches) {
+        p.alpha += ((p.visible ? 1 : 0) - p.alpha) * (reduceMotion ? 1 : Math.min(1, dt * 10));
+        if (p.alpha < 0.01) continue;
+        const close = Math.min(1, Math.max(0, (p.gap - PINCH_ON) / (0.9 - PINCH_ON)));
+        let rT = p.down ? CURSOR_R_PRESS : CURSOR_R_PRESS + (CURSOR_R - CURSOR_R_PRESS) * close;
+        if (p.hover) rT *= 1.25;
+        p.r += (rT - p.r) * k;
+        p.press += ((p.down ? 1 : 0) - p.press) * k;
+        const accent = p.hover || p.down ? 1 : 0;
+        p.accent += (accent - p.accent) * k;
+
+        ctx.save();
+        ctx.globalAlpha = p.alpha;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
+        ctx.shadowBlur = 12;
+        ctx.shadowOffsetY = 2;
+        // 채움: 반투명 흰색 → 집으면 강조색
+        const a = 0.18 + 0.72 * p.press;
+        ctx.fillStyle = `rgba(${255 - p.press}, ${Math.round(255 - 201 * p.press)}, ${Math.round(255 - 201 * p.press)}, ${a})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowColor = 'transparent';
+        // 테두리: 흰색 → 잡을 수 있거나 잡으면 강조색
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = `rgba(${255 - p.accent}, ${Math.round(255 - 201 * p.accent)}, ${Math.round(255 - 201 * p.accent)}, 0.9)`;
+        ctx.stroke();
+        // 위쪽 반사광 (유리 느낌)
+        if (p.r > 6) {
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r - 2.5, Math.PI * 1.15, Math.PI * 1.85);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+
+    // ---------- 틀 안에 불똥이가 있는지 ----------
+
+    // 점 하나를 찍으면 그 점에 있는 물체만 잘라낸 마스크 (1 = 물체, 찍은 점과 이어진 덩어리만)
+    function segmentAt(w, h, px, py) {
+      let out = null;
+      const start = Math.min(h - 1, Math.round(py * h)) * w + Math.min(w - 1, Math.round(px * w));
+      segmenter.segment(work, { keypoint: { x: px, y: py } }, (res) => {
+        const arr = res.categoryMask.getAsUint8Array();
+        const fg = arr[start];
+        out = new Uint8Array(w * h);
+        for (let i = 0; i < out.length; i++) out[i] = arr[i] === fg ? 1 : 0;
+      });
+      if (!out) return null;
+      const comp = new Uint8Array(w * h);
+      const q = new Int32Array(w * h);
+      let head = 0, tail = 0;
+      q[tail++] = start; comp[start] = 1;
+      while (head < tail) {
+        const i = q[head++], x = i % w;
+        if (x > 0 && out[i - 1] && !comp[i - 1]) { comp[i - 1] = 1; q[tail++] = i - 1; }
+        if (x < w - 1 && out[i + 1] && !comp[i + 1]) { comp[i + 1] = 1; q[tail++] = i + 1; }
+        if (i >= w && out[i - w] && !comp[i - w]) { comp[i - w] = 1; q[tail++] = i - w; }
+        if (i < w * h - w && out[i + w] && !comp[i + w]) { comp[i + w] = 1; q[tail++] = i + w; }
+      }
+      return comp;
+    }
+
+    // 틀(+여유) 부분만 잘라서 틀 가운데를 찍어보고, 잘린 물체가 틀을 얼마나 채우는지 계산
+    function checkGuide() {
+      const r = guideInVideo(MARGIN);
+      const w = WORK_W, h = Math.round(WORK_W * r.h / r.w);
+      if (work.width !== w || work.height !== h) { work.width = w; work.height = h; }
+      wctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, w, h);
+      const t = tplGrid(w, h);
+      let best = null;
+      for (const [px, py] of [[0.5, 0.55], [0.5, 0.4]]) {   // 몸통 가운데, 조금 위
+        const mask = segmentAt(w, h, px, py);
+        if (!mask) continue;
+        let inter = 0, outside = 0;
+        for (let i = 0; i < mask.length; i++) {
+          if (!mask[i]) continue;
+          if (t.g[i]) inter++; else outside++;
+        }
+        const cover = inter / t.area, spill = outside / t.area;
+        const ok = cover >= COVER_OK && spill <= SPILL_MAX;
+        if (!best || (ok && !best.ok) || (ok === best.ok && cover - spill > best.cover - best.spill)) {
+          best = { mask, cover, spill, ok };
+        }
+      }
+      lastInfo = best;
+      return !!(best && best.ok);
+    }
+
+    // Space: 틀 띄우기 / 숨기기 (틀이 떠 있을 때만 인식)
+    let lastSeenAt = 0;   // 틀을 띄운 시각 또는 마지막으로 불똥이가 인식된 시각 (자동 닫기 기준)
+    function setGuide(on) {
+      guideOn = on;
+      readyAt = 0;
+      lastSeenAt = performance.now();
+      armed = true;
+      stableCount = 0;
+      missCount = 0;
+      inside = false;
+      lastInfo = null;
+      status.textContent = on ? '불똥이를 틀에 맞춰주세요' : 'Space를 눌러 불똥이를 추가해보세요';
+      // 주요 버튼: 틀이 떠 있으면 "닫기"로
+      const btn = document.getElementById('btnCapture');
+      btn.classList.toggle('on', on);
+      swapText(btn.querySelector('.txt'), on ? '틀 닫기' : '틀 띄우기');
+    }
+
+    // ---------- 틀 안의 불똥이 → 스프라이트 이미지 ----------
+
+    function cutout() {
+      const r = guideInVideo(0);
+      const scale = Math.min(1, 500 / r.h);
+      const out = document.createElement('canvas');
+      out.width = Math.round(r.w * scale); out.height = Math.round(r.h * scale);
+      const o = out.getContext('2d');
+      o.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, out.width, out.height);
+      // 영상 원본 기준 모양으로 오림 (화면 틀을 거울로 뒤집은 모양)
+      o.globalCompositeOperation = 'destination-in';
+      o.drawImage(silhouette, 0, 0, out.width, out.height);
+      return out;
+    }
+
+    // ---------- 뛰어다니는 불똥이 ----------
+
+    class Sprite {
+      constructor(img, x, y, h0) {
+        this.img = img;
+        this.h = innerHeight * (0.2 + Math.random() * 0.06);
+        this.w = this.h * img.width / img.height;
+        this.h0 = h0 || this.h;
+        this.x = x; this.y = y;
+        const a = Math.random() * Math.PI * 2;
+        this.speed = innerHeight * (0.18 + Math.random() * 0.12);
+        this.vx = Math.cos(a); this.vy = Math.sin(a);
+        this.hop = Math.random() * Math.PI;
+        this.hopRate = 7 + Math.random() * 3;
+        this.age = 0;
+        this.turnIn = 1 + Math.random() * 2;
+        this.holder = null;      // 이 불똥이를 집고 있는 손 (없으면 null)
+        this.hovered = false;    // 손가락이 위에 있어서 잡을 수 있는 상태
+        this.hover = 0;          // hover 강조 애니메이션 (0~1)
+        this.swing = 0;
+        this.fallV = 0;
+        // 바라보는 방향: 1 = 원래 모습(오른쪽으로 갈 때), -1 = 좌우 반전(왼쪽으로 갈 때)
+        this.faceTarget = this.vx < 0 ? -1 : 1;
+        this.face = this.faceTarget;
+      }
+
+      // 그 자리에서 불이 꺼지며 사라지기 (delay초 뒤 시작)
+      fizzle(delay = 0) {
+        if (this.fadeT != null) return;
+        this.fadeT = 0;
+        this.fadeDelay = delay;
+      }
+
+      update(dt) {
+        this.age += dt;
+        this.hover += ((this.hovered ? 1 : 0) - this.hover) * (reduceMotion ? 1 : Math.min(1, dt * 12));
+        // 꺼지는 중: 잡고 있던 손은 놓고, 불이 작아지며 색이 빠지다 연기를 남기고 사라짐
+        if (this.fadeT != null && (this.fadeDelay -= dt) <= 0) {
+          if (this.holder) { this.holder.sprite = null; this.holder = null; }
+          this.fadeT = Math.min(1, this.fadeT + dt / FIZZLE_S);
+          if (!this.smoked && this.fadeT > 0.35) {
+            this.smoked = true;
+            smoke(this.x, this.y - this.h * 0.5, this.w, 0, 0, 5);
+          }
+          if (this.fadeT >= 1) this.gone = true;
+          return;
+        }
+        // 머리 위 불꽃 끝에서 불티가 피어오름 (등장 연출이 끝난 뒤부터, 들고 있을 때도, 날아갈 땐 꼬리처럼 더 많이)
+        if (this.age > this.liftTime() + ENTER_SHRINK_S) {
+          this.emberT = (this.emberT ?? Math.random() / EMBER_RATE) - dt;
+          if (this.emberT <= 0) {
+            this.emberT = (0.5 + Math.random()) / (EMBER_RATE * (this.thrown ? 4 : 1));
+            const scale = this.held ? 1.1 : 1;
+            ember(this.x + (Math.random() - 0.5) * this.w * 0.12, this.y - (this.lastLift || 0) - this.h * 0.93 * scale);
+          }
+        }
+        if (this.thrown) {
+          // 던져진 뒤: 포물선 + 회전, 화면을 완전히 벗어나면 불이 꺼지며 연기
+          this.x += this.tvx * dt;
+          this.y += this.tvy * dt;
+          this.tvy += THROW_GRAVITY * dt;
+          this.spin = (this.spin || 0) + this.spinV * dt;
+          const out = this.x + this.w / 2 < 0 || this.x - this.w / 2 > innerWidth || this.y < 0 || this.y - this.h > innerHeight;
+          if (out) extinguish(this);
+          return;
+        }
+        if (this.held) {
+          // 집혀 있는 동안: 손을 따라가며 대롱대롱
+          const h = this.holder;
+          const tx = h.x + h.offX, ty = h.y + h.offY;
+          this.swing = (this.swing || 0) * 0.85 + (tx - this.x) * 0.004;
+          this.x = tx; this.y = ty;
+          this.hop += dt * 4;
+          return;
+        }
+        this.turnIn -= dt;
+        if (this.turnIn <= 0) {
+          // 가끔 방향을 바꿔서 이리저리 돌아다니게
+          const a = Math.atan2(this.vy, this.vx) + (Math.random() - 0.5) * 2.4;
+          this.vx = Math.cos(a); this.vy = Math.sin(a);
+          this.turnIn = 1 + Math.random() * 2.5;
+        }
+        // 등장(떠오름 → 줄어듦) 동안은 제자리, 다 떠오르면 불꽃이 톡 터짐
+        const lifted = this.age >= this.liftTime();
+        if (lifted && !this.burst) { this.burst = true; spark(this.x, this.y - this.h0 * 0.5, 24); }
+        if (this.age < this.liftTime() + (reduceMotion ? 0 : ENTER_SHRINK_S)) return;
+        const go = 1;
+        this.x += this.vx * this.speed * dt * go;
+        this.y += this.vy * this.speed * dt * go * 0.6;
+
+        const mx = this.w / 2, top = innerHeight * 0.25, bottom = innerHeight - 20;
+        if (this.x < mx) { this.x = mx; this.vx = Math.abs(this.vx); }
+        if (this.x > innerWidth - mx) { this.x = innerWidth - mx; this.vx = -Math.abs(this.vx); }
+        if (this.y < top) {
+          // 높은 곳에서 놓으면 바닥 쪽으로 떨어짐
+          this.fallV = (this.fallV || 0) + 2500 * dt;
+          this.y = Math.min(top, this.y + this.fallV * dt);
+          if (this.y >= top) { this.fallV = 0; this.vy = Math.abs(this.vy); puff(this.x, this.y, this.w * 1.4); }
+        }
+        if (this.y > bottom) { this.y = bottom; this.vy = -Math.abs(this.vy); }
+        this.swing = (this.swing || 0) * 0.9;
+
+        // 가는 방향이 확실히 바뀌었을 때만 돌아섬 (위아래로만 갈 땐 그대로 → 덜 깜빡임)
+        if (this.vx > TURN_THRESHOLD) this.faceTarget = 1;
+        else if (this.vx < -TURN_THRESHOLD) this.faceTarget = -1;
+        // 휙 뒤집지 않고 몸을 돌리듯 짧게 (HIG: 갑작스러운 변화 대신 자연스러운 전환, '동작 줄이기'면 바로)
+        this.face = reduceMotion ? this.faceTarget : this.face + (this.faceTarget - this.face) * Math.min(1, dt / TURN_S * 3);
+
+        const prev = Math.sin(this.hop);
+        this.hop += this.hopRate * dt;
+        // 착지할 때마다 불똥 튀기기
+        if (go && prev > 0 && Math.sin(this.hop) <= 0) { puff(this.x, this.y, this.w); spark(this.x, this.y - 4, LAND_SPARKS); }
+      }
+
+      get held() { return !!this.holder; }
+
+      // 발밑 그림자: 가장자리가 부드럽게 흐려지고, 높이 뛸수록 작고 옅어짐 (집혀 있을 땐 없음)
+      // 모든 불똥이 몸보다 먼저 그려서 다른 불똥이 머리 위에 그림자가 얹히지 않게
+      drawShadow() {
+        if (this.held || this.thrown) return;
+        const s = Math.abs(Math.sin(this.hop));
+        const air = this.age < this.liftTime() + ENTER_SHRINK_S ? 0 : s;
+        const fade = this.fadeT != null && this.fadeDelay <= 0 ? 1 - this.fadeT : 1;   // 꺼질 때 그림자도 같이 옅어짐
+        softEllipse(this.x, this.y, this.w * 0.42 * (1 - air * 0.3), this.h * 0.07 * (1 - air * 0.3), SHADOW_ALPHA * (1 - air * 0.5) * fade);
+      }
+
+      liftTime() { return reduceMotion ? 0 : ENTER_LIFT_S; }
+
+      draw() {
+        // 등장: ① 틀 안에서 살짝 커지며 떠오름(그림자가 짙어짐) ② 뛰어다니는 크기로 줄어들며 내려앉음
+        const LT = this.liftTime(), ST = reduceMotion ? 0 : ENTER_SHRINK_S;
+        const full = this.h0 / this.h, peak = full * (1 + LIFT_SCALE);
+        let size = 1, raise = 0, depth = 0;
+        const entering = this.age < LT + ST;
+        if (this.age < LT) {
+          const e = 1 - Math.pow(1 - this.age / LT, 3);
+          size = full + (peak - full) * e; raise = this.h0 * LIFT_RAISE * e; depth = e;
+        } else if (this.age < LT + ST) {
+          const e = 1 - Math.pow(1 - (this.age - LT) / ST, 3);
+          size = peak + (1 - peak) * e; raise = this.h0 * LIFT_RAISE * (1 - e); depth = 1 - e;
+        }
+
+        const s = this.held || entering ? 0 : Math.abs(Math.sin(this.hop));
+        const lift = s * this.h * 0.18 + raise;
+        this.lastLift = lift;   // 불티가 지금 머리 위치에서 나오도록 기억
+        const squash = this.held ? 1 / (1 + Math.sin(this.hop) * 0.04) : 1 + (entering ? 0 : (1 - s) * 0.08);
+
+        // 불똥이는 정면을 보고 있으니 좌우 반전 대신 가는 방향으로 살짝 기울임
+        // 잡을 수 있을 때 살짝 들리고(hover), 집으면 더 커짐 — visionOS의 들어 올림 느낌
+        // 꺼지는 중: 작아지고(동작 줄이기면 그대로) 투명해지며 색이 빠짐
+        const fading = this.fadeT != null && this.fadeDelay <= 0 ? this.fadeT : 0;
+        const fadeScale = reduceMotion ? 1 : 1 - 0.3 * fading * fading;
+        const grabbed = (this.held ? 1.1 : 1 + 0.05 * this.hover) * fadeScale;
+        const tilt = this.held ? -(this.swing || 0) : this.vx * 0.12 + Math.sin(this.hop * 2) * 0.05 - (this.swing || 0);
+        ctx.save();
+        ctx.translate(this.x, this.y - lift);
+        if (this.thrown) {
+          // 날아가는 동안 몸 가운데를 축으로 빙글
+          ctx.translate(0, -this.h / 2);
+          ctx.rotate(this.spin || 0);
+          ctx.translate(0, this.h / 2);
+        } else {
+          ctx.rotate(Math.max(-0.6, Math.min(0.6, tilt)));
+        }
+        // 돌아서는 중간엔 너무 납작해지지 않게 최소 폭을 둠
+        const faceX = Math.sign(this.face || 1) * Math.max(0.12, Math.abs(this.face));
+        ctx.scale(size * squash * grabbed * faceX, size / squash * grabbed);
+        // 떠오른 만큼 아래로 부드러운 그림자 (등장할 때, 잡을 수 있을 때, 집혀 있을 때)
+        const lifted = Math.max(depth, this.held ? 1 : this.hover * 0.6);
+        if (lifted > 0.01) {
+          ctx.shadowColor = `rgba(0, 0, 0, ${0.45 * lifted})`;
+          ctx.shadowBlur = 30 * lifted;
+          ctx.shadowOffsetY = 14 * lifted;
+        }
+        if (fading > 0) {
+          ctx.globalAlpha = 1 - Math.pow(fading, 1.6);
+          ctx.filter = `grayscale(${fading}) brightness(${1 - 0.35 * fading})`;
+        }
+        ctx.drawImage(this.img, -this.w / 2, -this.h, this.w, this.h);
+        ctx.restore();
+      }
+    }
+
+    // 가장자리가 부드럽게 흐려지는 타원 (그림자·먼지)
+    function softEllipse(x, y, rx, ry, alpha) {
+      if (alpha <= 0.005 || rx < 1) return;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(1, ry / rx);
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+      g.addColorStop(0, `rgba(0, 0, 0, ${alpha})`);
+      g.addColorStop(0.45, `rgba(0, 0, 0, ${alpha * 0.7})`);
+      g.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(0, 0, rx, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 착지: 발밑에서 먼지가 살짝 퍼졌다 사라짐 (머리 위로 튀는 것 없이)
+    function puff(x, y, w) {
+      if (reduceMotion) return;
+      particles.push({ kind: 'puff', x, y, w, life: 1 });
+    }
+
+    // 불티: 불꽃 끝에서 천천히 떠오르며 흔들리다 꺼짐 (하양-노랑 → 주황 → 빨강)
+    function ember(x, y) {
+      if (reduceMotion || particles.length > PARTICLE_MAX) return;
+      particles.push({
+        kind: 'ember', x, y, vx: (Math.random() - 0.5) * 30, vy: -(50 + Math.random() * 60),
+        life: 1, dur: 0.9 + Math.random() * 0.6, r: 1.8 + Math.random() * 1.8, wob: Math.random() * 6.28
+      });
+    }
+
+    // 불꽃 튐: 짧은 빛줄기가 사방으로 탁 튀고 중력에 떨어지며 꺼짐 (착지, 튀어나올 때, 집을 때)
+    function spark(x, y, count) {
+      if (reduceMotion) return;
+      const n = Math.round(count * EMBER_SCALE);
+      for (let i = 0; i < n && particles.length < PARTICLE_MAX; i++) {
+        const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.6;
+        const v = 120 + Math.random() * 180;
+        particles.push({ kind: 'spark', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, dur: 0.35 + Math.random() * 0.25 });
+      }
+    }
+
+    function updateParticles(dt) {
+      for (const p of particles) {
+        if (p.kind === 'puff') { p.life -= dt / 0.45; continue; }
+        if (p.kind === 'smoke') {
+          if (p.delay > 0) { p.delay -= dt; continue; }
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vx *= 1 - dt * 0.8; p.vy = p.vy * (1 - dt * 0.5) - 12 * dt;   // 점점 느려지며 위로
+          p.life -= dt / p.dur;
+          continue;
+        }
+        if (p.kind === 'ember') {
+          p.wob += dt * 5;
+          p.x += (p.vx + Math.sin(p.wob) * 18) * dt;   // 아지랑이처럼 좌우로 흔들
+          p.y += p.vy * dt;
+          p.vy *= 1 - dt * 0.6;
+        } else {
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vx *= 1 - dt * 1.5; p.vy += 520 * dt;      // 공기 저항 + 중력
+        }
+        p.life -= dt / p.dur;
+      }
+      particles = particles.filter(p => p.life > 0);
+    }
+
+    // 화면 밖으로 나간 불똥이: 나간 자리(화면 가장자리)에서 불이 치익 꺼지고 연기가 피어오름
+    function extinguish(s) {
+      s.gone = true;
+      if (reduceMotion) return;   // '동작 줄이기'면 조용히 사라짐
+      const ex = Math.min(innerWidth - 8, Math.max(8, s.x));
+      const ey = Math.min(innerHeight - 8, Math.max(8, s.y - s.h / 2));
+      // 화면 안쪽 방향 (연기가 가장자리에서 안으로 살짝 밀려 들어오게)
+      const ix = s.x < 0 ? 1 : s.x > innerWidth ? -1 : 0;
+      const iy = s.y - s.h / 2 < 0 ? 1 : s.y - s.h / 2 > innerHeight ? -1 : 0;
+      spark(ex, ey, 6);   // 꺼지기 직전 마지막 불꽃
+      smoke(ex, ey, s.w, ix, iy, SMOKE_PUFFS);
+    }
+
+    // 연기 피우기: (ix, iy) 쪽으로 살짝 밀려나며 위로 피어오름
+    function smoke(x, y, w, ix, iy, count) {
+      if (reduceMotion) return;
+      for (let i = 0; i < count && particles.length < PARTICLE_MAX; i++) {
+        particles.push({
+          kind: 'smoke',
+          x: x + (Math.random() - 0.5) * w * 0.3, y: y + (Math.random() - 0.5) * w * 0.3,
+          vx: ix * (25 + Math.random() * 35) + (Math.random() - 0.5) * 20,
+          vy: iy * (25 + Math.random() * 35) - (30 + Math.random() * 40),   // 위로 피어오름
+          r0: w * (0.12 + Math.random() * 0.1), grow: w * (0.5 + Math.random() * 0.4),
+          life: 1, dur: 1.4 + Math.random() * 0.9, delay: i * 0.04
+        });
+      }
+    }
+
+    // 연기: 회색 반투명 덩어리가 커지며 위로 흩어짐 (테두리 없이 부드럽게)
+    function drawSmoke() {
+      for (const p of particles) {
+        if (p.kind !== 'smoke' || p.delay > 0) continue;
+        const t = 1 - p.life, e = 1 - Math.pow(1 - t, 2);
+        const r = p.r0 + p.grow * e;
+        const a = SMOKE_ALPHA * Math.min(1, t * 6) * p.life;   // 빠르게 짙어졌다 천천히 옅어짐
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+        g.addColorStop(0, `rgba(200, 200, 205, ${a})`);
+        g.addColorStop(0.5, `rgba(170, 170, 178, ${a * 0.6})`);
+        g.addColorStop(1, 'rgba(160, 160, 168, 0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // 불 온도 색: 막 튀었을 땐 하양-노랑, 식을수록 주황 → 빨강(#FE3636)
+    function fireColor(t, a) {
+      const r = 255, g = Math.round(54 + 186 * Math.pow(t, 1.4)), b = Math.round(54 + 140 * Math.pow(t, 3));
+      return `rgba(${r}, ${g}, ${b}, ${a})`;
+    }
+
+    // 바닥 층: 먼지
+    function drawPuffs() {
+      for (const p of particles) {
+        if (p.kind !== 'puff') continue;
+        const t = 1 - p.life, e = 1 - Math.pow(1 - t, 3);
+        softEllipse(p.x, p.y, p.w * (0.3 + 0.35 * e), p.w * (0.05 + 0.04 * e), 0.18 * p.life);
+      }
+    }
+
+    // 위 층: 불티·불꽃 (은은하게 빛나며 겹치면 밝아짐)
+    function drawEmbers() {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.lineCap = 'round';
+      for (const p of particles) {
+        if (p.kind === 'puff' || p.kind === 'smoke') continue;
+        const t = p.life, a = Math.min(1, t * 1.6) * (p.kind === 'ember' ? 0.9 : 1);
+        // 불티는 꺼지기 직전 살짝 깜빡임
+        const flick = p.kind === 'ember' && t < 0.35 ? 0.6 + 0.4 * Math.sin(p.wob * 3) : 1;
+        ctx.shadowColor = fireColor(t * 0.6, a * 0.8);
+        ctx.shadowBlur = 8;
+        if (p.kind === 'spark') {
+          // 움직이는 방향으로 짧은 빛줄기
+          ctx.strokeStyle = fireColor(t, a);
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          ctx.moveTo(p.x, p.y);
+          ctx.lineTo(p.x - p.vx * 0.035, p.y - p.vy * 0.035);
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = fireColor(t, a * flick);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r * (0.5 + 0.5 * t), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    }
+
+    // ---------- 화면 ----------
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      stage.width = innerWidth * dpr;
+      stage.height = innerHeight * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    // 영상을 화면 가득 채우는(cover) 배치
+    function videoLayout() {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      const s = Math.max(innerWidth / vw, innerHeight / vh);
+      return { s, ox: (innerWidth - vw * s) / 2, oy: (innerHeight - vh * s) / 2 };
+    }
+
+    // ---------- 인식 → 캡처 ----------
+
+    let capturedAt = -1e9;   // 마지막으로 찍힌 시각 (윤곽선이 강조색으로 완성되는 연출용)
+    function capture() {
+      capturedAt = performance.now();
+      if (!video.videoWidth) return;
+      const g = guideBox();
+      // 틀 안의 불똥이가 살짝 떠올랐다가 화면으로 튀어나옴 (불꽃은 떠오른 뒤 Sprite가 터뜨림)
+      sprites.push(new Sprite(cutout(), g.x + g.w / 2, g.y + g.h, g.h));
+      // 너무 많으면 가장 오래된 것부터 정리 (누가 손에 들고 있는 건 빼고)
+      // 너무 많으면 가장 오래된 것부터 차례로 불이 꺼지며 연기로 사라짐 (누가 손에 든 건 빼고)
+      const alive = sprites.filter(s => s.fadeT == null && !s.thrown);
+      let excess = alive.length - MAX_SPRITES;
+      for (let i = 0, k = 0; excess > 0 && i < alive.length; i++) {
+        if (alive[i].held) continue;
+        alive[i].fizzle(k++ * OVERFLOW_STAGGER_S);
+        excess--;
+      }
+      blink = 1;
+      // 유리는 부드럽게 풀리며 틀이 닫히고 깨끗한 화면으로 (다음 불똥이는 다시 Space)
+      setGuide(false);
+      status.textContent = '다음 불똥이를 추가하려면 Space를 눌러주세요';
+    }
+
+    async function detectLoop() {
+      while (true) {
+        if (guideOn && segmenter && video.videoWidth) {
+          let ok = false;
+          try { ok = checkGuide(); } catch (e) { console.error(e); }
+
+          if (ok) {
+            missCount = 0;
+            inside = true;
+            stableCount++;
+            lastSeenAt = performance.now();
+          } else if (++missCount >= 3) {
+            inside = false;
+            stableCount = 0;
+            readyAt = 0;
+            if (!armed) { armed = true; status.textContent = '불똥이를 틀에 맞춰주세요'; }
+          }
+
+          if (armed && inside) {
+            status.textContent = '그대로 잠시만 기다려주세요';
+            // 인식이 안정된 뒤에도 잠깐(CAPTURE_DELAY_MS) 기다렸다가 찍음 → 그동안 틀 색이 아래부터 차오름
+            if (stableCount >= STABLE_NEEDED) {
+              if (!readyAt) readyAt = performance.now();
+              if (performance.now() - readyAt >= CAPTURE_DELAY_MS) capture();
+            }
+          }
+        }
+        await new Promise(r => setTimeout(r, 80));
+      }
+    }
+
+    // ---------- 그리기 ----------
+
+    function drawVideo(c, blur) {
+      const L = videoLayout();
+      c.save();
+      c.translate(innerWidth, 0);
+      c.scale(-1, 1);   // 거울처럼 좌우반전
+      if (blur > 0) c.filter = `blur(${blur}px)`;
+      c.drawImage(video, L.ox, L.oy, video.videoWidth * L.s, video.videoHeight * L.s);
+      c.restore();
+    }
+
+    // ---------- Apple 스타일 리퀴드 글라스 (WebGL) ----------
+    // 틀 바깥은 두꺼운 유리판, 틀 모양 구멍의 가장자리는 둥글게 깎인 유리처럼:
+    //  - 굴절: 가장자리 경사면에서 뒤 화면이 구멍 쪽으로 휘어 보임 (색 번짐 포함)
+    //  - 투명도: 판 전체는 젖빛 유리처럼 부드럽게 흐림
+    //  - 빛 반사: 천천히 도는 조명에 가장자리가 반짝이고, 빛줄기가 판 위를 지나감
+    //  - 움직임: 나타날 때 구멍이 물처럼 열리고, 가장자리가 살짝 일렁임
+
+    const GLASS_VS = `#version 300 es
+      in vec2 aPos;
+      out vec2 vUv;
+      void main() {
+        vUv = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);   // 왼쪽 위가 (0,0)
+        gl_Position = vec4(aPos, 0.0, 1.0);
+      }`;
+
+    const GLASS_FS = `#version 300 es
+      precision highp float;
+      in vec2 vUv;
+      out vec4 outColor;
+      uniform sampler2D uVideo, uSdf, uMask;
+      uniform vec2 uRes, uVideoSize;
+      uniform vec3 uCover;          // 영상 배치: 배율, x/y 여백 (화면 px)
+      uniform vec4 uBox;            // 틀 위치 (화면 px)
+      uniform vec4 uSdfRect;        // 틀 → 거리맵 텍스처 좌표
+      uniform float uRange, uTime, uAmount, uGlow;
+      uniform float uBevel, uRefract, uFrost, uMag;
+      uniform float uDim, uMotion;  // 밝은 배경일 때 어둡게 하는 막 (최대 0.35), 움직임 on/off
+      uniform float uScan;          // 불똥이를 스캔하는 동안 유리가 짙어지는 정도 (0~1)
+      uniform float uScanFrost, uScanDim, uScanRefract;
+      uniform float uSat;           // 채도 (하단 바 saturate(180%)와 맞춤)
+      uniform vec4 uTint;           // 유리 틴트 색 + 세기 (하단 바 배경색과 맞춤)
+      uniform float uShadow, uShadowOffset, uShadowBlur;   // 구멍 안 그림자
+      uniform float uRim;           // 구멍 가장자리 유리 반사 세기 (0 = 없음)
+      uniform float uBlurPx;        // 흐림 반경 (화면 px)
+      uniform vec2 uLight;          // 빛이 오는 방향 (포인터를 따라 살짝 움직임)
+
+      // 화면 좌표 → 영상 텍스처 좌표 (거울 + 화면 채우기)
+      vec2 videoUv(vec2 px) {
+        float x = uRes.x - px.x;
+        return vec2((x - uCover.y) / uCover.x / uVideoSize.x, (px.y - uCover.z) / uCover.x / uVideoSize.y);
+      }
+
+      // 틀 가장자리까지 거리 (틀 키 단위, 구멍 안은 음수)
+      float sdf(vec2 px) {
+        vec2 uv = uSdfRect.xy + (px - uBox.xy) / uBox.zw * uSdfRect.zw;
+        if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return uRange;
+        return texture(uSdf, uv).r;
+      }
+
+      void main() {
+        vec2 px = vUv * uRes;
+        float boxH = uBox.w;
+        float open = uAmount;
+
+        float d = sdf(px) * boxH;
+
+        // 구멍(틀 안): 실루엣 이미지를 그대로 써서 가장자리가 윤곽선과 정확히 겹치게 (흐린 거리맵으로 깎지 않음)
+        vec2 lu = (px - uBox.xy) / uBox.zw;
+        float hole = all(greaterThanEqual(lu, vec2(0.0))) && all(lessThanEqual(lu, vec2(1.0))) ? texture(uMask, lu).a : 0.0;
+        float mask = 1.0 - hole;
+        if (mask <= 0.001) { outColor = vec4(0.0); return; }
+
+        // 경사면 방향 (구멍 → 유리 쪽)
+        float e = 3.0;
+        vec2 grad = vec2(sdf(px + vec2(e, 0.0)) - sdf(px - vec2(e, 0.0)),
+                         sdf(px + vec2(0.0, e)) - sdf(px - vec2(0.0, e)));
+        vec2 n = dot(grad, grad) > 1e-12 ? normalize(grad) : vec2(0.0);
+
+        float W = max(uBevel * boxH * open, 1.0);
+        float t = clamp(d / W, 0.0, 1.0);
+        float slope = (1.0 - t) * (1.0 - t);           // 가장자리일수록 가파름
+
+        // 굴절: 판 전체는 살짝 확대, 경사면에서는 구멍 쪽으로 크게 휨 (빨강/초록/파랑 조금씩 다르게)
+        vec2 center = uRes * 0.5;
+        vec2 p = center + (px - center) / uMag;
+        vec2 off = -n * slope * uRefract * open * (1.0 + uScan * uScanRefract);
+        // 부드러운 흐림: 주변 24곳을 나선(황금각)으로 고르게 찍어 평균 → 줄인 영상을 키울 때 생기는 픽셀 계단이 없음
+        vec3 col = vec3(0.0);
+        for (int i = 0; i < 24; i++) {
+          float fi = float(i) + 0.5;
+          float r = sqrt(fi / 24.0) * uBlurPx;
+          float a = fi * 2.39996;
+          col += textureLod(uVideo, videoUv(p + off + vec2(cos(a), sin(a)) * r), uFrost).rgb;
+        }
+        col /= 24.0;
+
+        // 젖빛 유리: 흐림만 주고 밝기는 원래 화면 그대로 유지 (어두워지지 않게)
+        float l = dot(col, vec3(0.299, 0.587, 0.114));
+        col = mix(vec3(l), col, uSat);
+        col = mix(col, uTint.rgb, uTint.a);
+        // 스캔 중에만 아주 살짝 눌러서 틀 안에 시선이 가게
+        col *= 1.0 - uScan * uScanDim;
+
+        // 가장자리: 빛을 받는 쪽은 밝은 반사선, 반대쪽은 약한 반사, 둘레엔 얇은 유리선 (하단 바 테두리처럼)
+        vec2 L = normalize(uLight);
+        float spec = pow(max(dot(n, -L), 0.0), 8.0) * slope * slope;
+        float spec2 = pow(max(dot(n, L), 0.0), 8.0) * slope * slope * 0.25;
+        float edgeLine = exp(-max(d, 0.0) / 0.9);       // 0.5px 유리선
+        vec3 rimColor = mix(vec3(1.0), vec3(1.0, 0.45, 0.45), uGlow);
+        col += rimColor * (spec * 0.7 + spec2 + edgeLine * 0.3) * uRim;   // 틀 테두리는 흰 윤곽선이 맡아서 유리 반사는 끔(uRim 0)
+
+        // 불똥이가 틀에 들어오면 가장자리 유리가 주황빛으로 달아오름
+        col += vec3(0.996, 0.212, 0.212) * uGlow * exp(-d / (boxH * 0.05)) * 0.4;   // #FE3636
+
+        float a = mask * open;
+        outColor = vec4(clamp(col, 0.0, 1.0) * a, a);   // premultiplied
+      }`;
+
+    // 틀 모양의 거리맵 (가장자리에서 얼마나 떨어졌는지, 틀 키 단위)
+    function buildSdf(range) {
+      const SW = 320, SH = Math.round(SW / ASPECT);
+      const PAD = Math.ceil(SH * range) + 2;
+      const W = SW + PAD * 2, H = SH + PAD * 2;
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      const cc = c.getContext('2d', { willReadFrequently: true });
+      cc.drawImage(guideSil, PAD, PAD, SW, SH);
+      const a = cc.getImageData(0, 0, W, H).data;
+      const inside = new Uint8Array(W * H);
+      for (let i = 0; i < inside.length; i++) inside[i] = a[i * 4 + 3] > 127 ? 1 : 0;
+
+      // 2번 훑는 chamfer 거리 변환 (feature = 반대편 픽셀)
+      const dist = (feature) => {
+        const D = new Float32Array(W * H);
+        for (let i = 0; i < D.length; i++) D[i] = inside[i] === feature ? 0 : 1e9;
+        const S = Math.SQRT2;
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          const i = y * W + x; let v = D[i];
+          if (x > 0) v = Math.min(v, D[i - 1] + 1);
+          if (y > 0) {
+            v = Math.min(v, D[i - W] + 1);
+            if (x > 0) v = Math.min(v, D[i - W - 1] + S);
+            if (x < W - 1) v = Math.min(v, D[i - W + 1] + S);
+          }
+          D[i] = v;
+        }
+        for (let y = H - 1; y >= 0; y--) for (let x = W - 1; x >= 0; x--) {
+          const i = y * W + x; let v = D[i];
+          if (x < W - 1) v = Math.min(v, D[i + 1] + 1);
+          if (y < H - 1) {
+            v = Math.min(v, D[i + W] + 1);
+            if (x < W - 1) v = Math.min(v, D[i + W + 1] + S);
+            if (x > 0) v = Math.min(v, D[i + W - 1] + S);
+          }
+          D[i] = v;
+        }
+        return D;
+      };
+      const toIn = dist(1), toOut = dist(0);
+      // 8비트로 담으면 가장자리에 계단 무늬가 생겨서 실수(float)로 그대로 담음
+      const data = new Float32Array(W * H);
+      for (let i = 0; i < W * H; i++) {
+        const sd = (inside[i] ? -(toOut[i] - 0.5) : (toIn[i] - 0.5)) / SH;
+        data[i] = Math.min(range, Math.max(-range, sd));
+      }
+      // 각진 부분을 부드럽게 (가로·세로 2번 평균)
+      const tmp = new Float32Array(W * H), R = 2;
+      for (let pass = 0; pass < 2; pass++) {
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          let s = 0, n = 0;
+          for (let k = -R; k <= R; k++) { const xx = x + k; if (xx >= 0 && xx < W) { s += data[y * W + xx]; n++; } }
+          tmp[y * W + x] = s / n;
+        }
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          let s = 0, n = 0;
+          for (let k = -R; k <= R; k++) { const yy = y + k; if (yy >= 0 && yy < H) { s += tmp[yy * W + x]; n++; } }
+          data[y * W + x] = s / n;
+        }
+      }
+      return { data, W, H, rect: [PAD / W, PAD / H, SW / W, SH / H] };
+    }
+
+    function createLiquidGlass() {
+      const canvas = document.createElement('canvas');
+      const gl = canvas.getContext('webgl2', { premultipliedAlpha: true, alpha: true });
+      if (!gl) return null;
+      const compile = (type, src) => {
+        const s = gl.createShader(type);
+        // 셰이더 안 한글 주석은 일부 브라우저에서 오류가 나서 빼고 넘김
+        gl.shaderSource(s, src.replace(/\/\/[^\n]*/g, '')); gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+        return s;
+      };
+      const prog = gl.createProgram();
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, GLASS_VS));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, GLASS_FS));
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+      gl.useProgram(prog);
+
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(prog, 'aPos');
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+      const U = {};
+      for (const n of ['uVideo', 'uSdf', 'uRes', 'uVideoSize', 'uCover', 'uBox', 'uSdfRect', 'uRange',
+        'uTime', 'uAmount', 'uGlow', 'uBevel', 'uRefract', 'uFrost', 'uMag', 'uDim', 'uMotion', 'uLight', 'uScan', 'uScanFrost', 'uScanDim', 'uScanRefract', 'uSat', 'uTint', 'uShadow', 'uShadowOffset', 'uShadowBlur', 'uRim', 'uMask', 'uBlurPx']) U[n] = gl.getUniformLocation(prog, n);
+
+      const makeTex = (unit) => {
+        const t = gl.createTexture();
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        return t;
+      };
+      const videoTex = makeTex(0);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      const sdfTex = makeTex(1);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      const maskTex = makeTex(2);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.uniform1i(U.uVideo, 0);
+      gl.uniform1i(U.uSdf, 1);
+      gl.uniform1i(U.uMask, 2);
+
+      const RANGE = GLASS_BEVEL * 2.5;   // 거리맵이 담는 범위 (틀 키 단위)
+      let sdfRect = null;
+
+      return {
+        canvas,
+        render(g, amount, glow, scanAmount, time) {
+          if (!sdfRect) {
+            const s = buildSdf(RANGE);
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, sdfTex);
+            gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16F, s.W, s.H, 0, gl.RED, gl.FLOAT, s.data);
+            gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+            sdfRect = s.rect;
+            // 구멍 모양: 화면에 보이는 실루엣 그대로
+            gl.activeTexture(gl.TEXTURE2);
+            gl.bindTexture(gl.TEXTURE_2D, maskTex);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, guideSil);
+          }
+          const q = Math.min(window.devicePixelRatio || 1, 1.5);
+          const w = Math.round(innerWidth * q), h = Math.round(innerHeight * q);
+          if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+          gl.viewport(0, 0, w, h);
+
+          // 매 프레임 카메라 영상을 텍스처로 (흐림용 축소본 포함)
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, videoTex);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+          gl.generateMipmap(gl.TEXTURE_2D);
+
+          const L = videoLayout();
+          gl.uniform2f(U.uRes, innerWidth, innerHeight);
+          gl.uniform2f(U.uVideoSize, video.videoWidth, video.videoHeight);
+          gl.uniform3f(U.uCover, L.s, L.ox, L.oy);
+          gl.uniform4f(U.uBox, g.x, g.y, g.w, g.h);
+          gl.uniform4f(U.uSdfRect, ...sdfRect);
+          gl.uniform1f(U.uRange, RANGE);
+          gl.uniform1f(U.uTime, time);
+          gl.uniform1f(U.uAmount, amount);
+          gl.uniform1f(U.uGlow, glow);
+          gl.uniform1f(U.uBevel, GLASS_BEVEL);
+          gl.uniform1f(U.uRefract, GLASS_REFRACT_PX);
+          gl.uniform1f(U.uFrost, reduceTransparency ? GLASS_FROST_SOLID : GLASS_FROST);
+          gl.uniform1f(U.uMag, GLASS_MAG);
+          gl.uniform1f(U.uDim, reduceTransparency ? 0.5 : bgDim);
+          gl.uniform1f(U.uMotion, reduceMotion ? 0 : 1);
+          gl.uniform2f(U.uLight, light.x, light.y);
+          gl.uniform1f(U.uScan, scanAmount);
+          gl.uniform1f(U.uScanFrost, SCAN_FROST);
+          gl.uniform1f(U.uScanDim, SCAN_DIM);
+          gl.uniform1f(U.uScanRefract, SCAN_REFRACT);
+          gl.uniform1f(U.uSat, GLASS_SAT);
+          gl.uniform4f(U.uTint, 30 / 255, 30 / 255, 32 / 255, GLASS_TINT_DARK);
+          gl.uniform1f(U.uShadow, GLASS_SHADOW);
+          gl.uniform1f(U.uShadowOffset, 10);
+          gl.uniform1f(U.uShadowBlur, 22);
+          gl.uniform1f(U.uRim, GLASS_RIM);
+          gl.uniform1f(U.uBlurPx, reduceTransparency ? GLASS_BLUR_PX * 1.8 : GLASS_BLUR_PX);
+
+          gl.clearColor(0, 0, 0, 0);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+          return canvas;
+        }
+      };
+    }
+
+    let liquidGlass = null;
+    try { liquidGlass = createLiquidGlass(); } catch (e) { console.error('리퀴드 글라스를 만들지 못했어요', e); }
+
+    // WebGL이 안 되는 브라우저용: 캔버스로 흉내낸 유리
+    const low = document.createElement('canvas');
+    const lowc = low.getContext('2d');
+    const glass = document.createElement('canvas');
+    const glassc = glass.getContext('2d');
+    function drawGlass2D(g, amount) {
+      // 1) 영상을 작게 줄였다가 키워서 부드럽게 흐림 (큰 blur보다 가벼움)
+      const k = 0.1;
+      const lw = Math.max(32, Math.round(innerWidth * k)), lh = Math.max(18, Math.round(innerHeight * k));
+      if (low.width !== lw || low.height !== lh) { low.width = lw; low.height = lh; }
+      lowc.setTransform(lw / innerWidth, 0, 0, lh / innerHeight, 0, 0);
+      drawVideo(lowc, 0);
+
+      const dpr = window.devicePixelRatio || 1;
+      const gw = Math.round(innerWidth * dpr), gh = Math.round(innerHeight * dpr);
+      if (glass.width !== gw || glass.height !== gh) { glass.width = gw; glass.height = gh; }
+      glassc.setTransform(dpr, 0, 0, dpr, 0, 0);
+      glassc.globalCompositeOperation = 'source-over';
+      glassc.clearRect(0, 0, innerWidth, innerHeight);
+
+      // 2) 유리 두께만큼 살짝 확대(굴절) + 밝고 선명한 색
+      const rw = innerWidth * GLASS_REFRACT, rh = innerHeight * GLASS_REFRACT;
+      glassc.save();
+      glassc.filter = `blur(${GLASS_BLUR}px) saturate(1.6) brightness(1.08)`;
+      glassc.drawImage(low, (innerWidth - rw) / 2, (innerHeight - rh) / 2, rw, rh);
+      glassc.restore();
+
+      // 3) 우윳빛 틴트 + 빛 반사 (왼쪽 위가 밝고 오른쪽 아래로 흐려짐)
+      glassc.fillStyle = `rgba(255, 255, 255, ${GLASS_TINT})`;
+      glassc.fillRect(0, 0, innerWidth, innerHeight);
+      const sheen = glassc.createLinearGradient(0, 0, innerWidth, innerHeight);
+      sheen.addColorStop(0, 'rgba(255, 255, 255, 0.22)');
+      sheen.addColorStop(0.35, 'rgba(255, 255, 255, 0.02)');
+      sheen.addColorStop(0.7, 'rgba(255, 255, 255, 0)');
+      sheen.addColorStop(1, 'rgba(255, 255, 255, 0.08)');
+      glassc.fillStyle = sheen;
+      glassc.fillRect(0, 0, innerWidth, innerHeight);
+
+      // 4) 틀 모양으로 구멍
+      glassc.globalCompositeOperation = 'destination-out';
+      glassc.drawImage(guideSil, g.x, g.y, g.w, g.h);
+
+      // 5) 구멍 가장자리에 유리 단면이 빛나는 느낌
+      const img = guideImages(g.w, g.h);
+      glassc.globalCompositeOperation = 'source-over';
+      glassc.save();
+      glassc.shadowColor = 'rgba(255, 255, 255, 0.9)';
+      glassc.shadowBlur = 16;
+      glassc.globalAlpha = 0.6;
+      glassc.drawImage(img.ring, g.x - 6, g.y - 6);
+      glassc.restore();
+
+      ctx.globalAlpha = amount;
+      ctx.drawImage(glass, 0, 0, innerWidth, innerHeight);
+      ctx.globalAlpha = 1;
+    }
+
+    // 스캔 윤곽선
+    //  - 평소: 흰 윤곽선
+    //  - 스캔이 진행될수록 아래(발)부터 위(불꽃 끝)로 #FE3636이 차오름 (경계는 부드럽게)
+    //  - 다 차면 찍히고, 닫힐 때 불똥이 쪽으로 살짝 조여들며 사라짐
+    function drawScanOutline(g) {
+      const now = performance.now();
+      const justCaptured = !guideOn && now - capturedAt < RELEASE_S * 1000 + 100;
+      const progress = justCaptured ? 1 : glow;
+      const shrink = guideOn ? 1 : 0.9 + 0.1 * presence;
+      const cx = g.x + g.w / 2, cy = g.y + g.h / 2;
+      const img = guideImages(g.w, g.h);
+      // 선은 구멍과 같은 실루엣에서 딴 띠 그림 → 가장자리와 정확히 겹침
+      const white = highContrast ? img.whiteBold : img.white;
+      const x = g.x - 6, y = g.y - 6;
+      ctx.save();
+      if (shrink !== 1) { ctx.translate(cx, cy); ctx.scale(shrink, shrink); ctx.translate(-cx, -cy); }
+      ctx.globalAlpha = presence * 0.9 * closeFade;
+      ctx.drawImage(white, x, y);
+      if (progress > 0.002) {
+        // 강조색 선을 그린 뒤, 아래쪽(차오른 높이까지)만 남기고 위는 부드럽게 지움
+        const red = highContrast ? img.accentBold : img.accent;
+        if (prog.width !== red.width || prog.height !== red.height) { prog.width = red.width; prog.height = red.height; }
+        progc.globalCompositeOperation = 'source-over';
+        progc.clearRect(0, 0, prog.width, prog.height);
+        progc.drawImage(red, 0, 0);
+        const top = 6 + g.h * (1 - progress);   // 이 높이 아래까지 색이 참
+        const grad = progc.createLinearGradient(0, top - FILL_FEATHER, 0, top + FILL_FEATHER);
+        grad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+        grad.addColorStop(1, 'rgba(0, 0, 0, 1)');
+        progc.globalCompositeOperation = 'destination-in';
+        progc.fillStyle = grad;
+        progc.fillRect(0, 0, prog.width, prog.height);
+        ctx.globalAlpha = presence * closeFade;
+        if (!highContrast) { ctx.shadowColor = 'rgba(254, 54, 54, 0.45)'; ctx.shadowBlur = 6; }
+        ctx.drawImage(prog, x, y);
+      }
+      ctx.restore();
+    }
+    const prog = document.createElement('canvas');
+    const progc = prog.getContext('2d');
+
+    let last = performance.now();
+    function frame(now) {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, 0, innerWidth, innerHeight);
+
+      // Space로 틀을 띄우면 틀 바깥이 리퀴드 글라스로 서서히 덮임
+      // 나타날 땐 빠르게, 사라질 땐 RELEASE_S 동안 부드럽게 풀림
+      presence += ((guideOn ? 1 : 0) - presence) * Math.min(1, dt * (guideOn ? 6 : 3 / RELEASE_S));
+
+      updateBgDim();
+      const lk = reduceMotion ? 1 : Math.min(1, dt * 4);
+      light.x += (lightTarget.x - light.x) * lk;
+      light.y += (lightTarget.y - light.y) * lk;
+
+      // 불똥이가 틀에 맞춰질수록 유리 가장자리가 주황빛으로
+      // 스캔 진행도: 인식이 안정되기까지 40% + 찍기 전 기다림 60%
+      let scanTarget = 0;
+      if (armed && inside) {
+        const a = Math.min(1, stableCount / STABLE_NEEDED);
+        const b = readyAt ? Math.min(1, (performance.now() - readyAt) / CAPTURE_DELAY_MS) : 0;
+        scanTarget = a * 0.4 + b * 0.6;
+      }
+      const glowTarget = scanTarget;
+      glow += (glowTarget - glow) * Math.min(1, dt * 8);
+      // 유리는 서서히 짙어지고(들어올 때), 빠지면 부드럽게 풀림 — '동작 줄이기'면 바로 바뀜
+      scan = reduceMotion ? scanTarget : scan + (scanTarget - scan) * Math.min(1, dt * (scanTarget > scan ? 4 : 6));
+
+      const g = guideBox();
+      const showGuide = guideSil.width && presence > 0.01;
+      // 나타날 때 살짝 튀어오르듯 (ease-out-back)
+      const pe = 1 + 2.2 * Math.pow(presence - 1, 3) + 1.2 * Math.pow(presence - 1, 2);
+      if (video.videoWidth) {
+        drawVideo(ctx, 0);
+        if (showGuide && liquidGlass) {
+          try {
+            // 틀 밖: 짙고 흐린 어두운 소재 (색 테두리 빛 없이 → glow 0)
+            ctx.drawImage(liquidGlass.render(g, Math.min(1, Math.max(0, pe)), 0, scan, now / 1000), 0, 0, innerWidth, innerHeight);
+          } catch (e) {
+            console.error('리퀴드 글라스 오류, 간단한 유리로 바꿀게요', e);
+            liquidGlass = null;
+          }
+        } else if (showGuide) {
+          drawGlass2D(g, presence);
+        }
+        // 틀을 띄우고 불똥이가 AUTO_CLOSE_MS 동안 인식되지 않으면 스스로 닫힘 (마지막 1초는 윤곽선·문구가 서서히 옅어짐)
+        const idle = guideOn && !inside ? performance.now() - lastSeenAt : 0;
+        if (idle > AUTO_CLOSE_MS) setGuide(false);
+        closeFade = guideOn ? Math.min(1, Math.max(0, (AUTO_CLOSE_MS - idle) / AUTO_CLOSE_FADE_MS)) : 1;
+
+        // 스캔 중엔 틀 아래 큰 안내 문구 (위쪽 상태 문구와 같은 내용)
+        document.body.classList.toggle('scanning', guideOn);
+        if (guideOn) swapText(caption, status.textContent);
+        caption.style.opacity = guideOn ? String(closeFade) : '';
+        const capTop = Math.round(g.y + g.h + 28);
+        if (caption.dataset.top !== String(capTop)) { caption.style.top = capTop + 'px'; caption.dataset.top = capTop; }
+        if (showGuide) {
+          drawScanOutline(g);
+        }
+      }
+      if (debug) drawDebug();
+
+      updateHands(now, dt);
+      updateHover();
+      // 집고 있는 불똥이는 맨 앞에
+      sprites.sort((a, b) => (a.held - b.held) || (a.y - b.y));
+      for (const s of sprites) s.update(dt);
+      if (sprites.some(s => s.gone)) {
+        for (const p of pinches) if (p.sprite && p.sprite.gone) p.sprite = null;
+        sprites = sprites.filter(s => !s.gone);
+      }
+      updateParticles(dt);
+      // 바닥 층(그림자·먼지) → 불똥이 몸 → 불씨 → 손 커서 순서로
+      drawPuffs();
+      for (const s of sprites) s.drawShadow();
+      for (const s of sprites) s.draw();
+      drawEmbers();
+      drawSmoke();
+      drawPinchCursors(dt);
+
+      // 찍힘 신호: 아이폰 셔터처럼 아주 짧게 살짝 어두워졌다 돌아옴 (하얀 번쩍임은 휴대폰 촬영을 방해해서 X)
+      if (blink > 0) {
+        ctx.fillStyle = `rgba(0, 0, 0, ${Math.sin(blink * Math.PI) * BLINK_DARK})`;
+        ctx.fillRect(0, 0, innerWidth, innerHeight);
+        blink = Math.max(0, blink - dt / (BLINK_MS / 1000));
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    // 인식 화면 보기 (D): 틀 부분 영상, AI가 잘라낸 물체(주황), 틀(초록), 점수
+    const dbg = document.createElement('canvas');
+    function drawDebug() {
+      if (!work.width) return;
+      const info = lastInfo, t = tplGrid(work.width, work.height);
+      dbg.width = work.width; dbg.height = work.height;
+      const dctx = dbg.getContext('2d');
+      dctx.drawImage(work, 0, 0);
+      const id = dctx.getImageData(0, 0, dbg.width, dbg.height);
+      for (let i = 0; i < t.g.length; i++) {
+        if (info && info.mask[i]) { id.data[i * 4] = 255; id.data[i * 4 + 1] = 120; id.data[i * 4 + 2] = 0; }
+        else if (t.g[i]) { id.data[i * 4 + 1] = Math.min(255, id.data[i * 4 + 1] + 80); }
+      }
+      dctx.putImageData(id, 0, 0);
+      const dh = 220, dw = dh * dbg.width / dbg.height;
+      ctx.save();
+      ctx.translate(12 + dw, 12);
+      ctx.scale(-1, 1);   // 화면과 같은 방향으로
+      ctx.drawImage(dbg, 0, 0, dw, dh);
+      ctx.restore();
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.fillRect(12, 12 + dh, Math.max(dw, 190), 54);
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px sans-serif';
+      if (info) {
+        ctx.fillText(`틀 채움 ${(info.cover * 100) | 0}% (${COVER_OK * 100}%↑)`, 18, 12 + dh + 16);
+        ctx.fillText(`틀 밖 ${(info.spill * 100) | 0}% (${SPILL_MAX * 100}%↓)`, 18, 12 + dh + 32);
+      }
+      ctx.fillText(`안정 ${stableCount}/${STABLE_NEEDED} ${armed ? '' : '(빼기 대기)'}`, 18, 12 + dh + 48);
+    }
+
+    // ---------- 조작 ----------
+
+    function toggleUI() {
+      showUI = !showUI;
+      document.body.classList.toggle('clean', !showUI);
+    }
+    function toggleFull() {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen();
+    }
+
+    document.getElementById('btnCapture').onclick = () => setGuide(!guideOn);
+    // 모두 지우기: 한꺼번에 툭 사라지지 않고, 하나씩 아주 짧은 간격으로 불이 꺼지며 연기로 사라짐
+    function clearSprites() {
+      sprites.filter(s => !s.thrown && s.fadeT == null).forEach((s, i) => s.fizzle(i * CLEAR_STAGGER_S));
+    }
+    // 마우스로 누른 버튼에 포커스가 남으면 Space가 그 버튼을 또 눌러서 풀어줌
+    for (const b of document.querySelectorAll('#ui button')) b.addEventListener('pointerup', () => b.blur());
+    addEventListener('keydown', e => {
+      if (e.code === 'Space') { e.preventDefault(); setGuide(!guideOn); }
+      else if (e.key === 'Enter' && guideOn) capture();   // 틀이 떠 있을 때 바로 인식
+      // 글자 대신 키보드 자리(e.code)로 판단 → 한글 입력 상태여도 동작
+      else if (e.code === 'KeyX') clearSprites();
+      else if (e.code === 'KeyH') toggleUI();
+      else if (e.code === 'KeyF') toggleFull();
+      else if (e.code === 'KeyD') debug = !debug;
+    });
+    addEventListener('resize', resize);
+
+    resize();
+    requestAnimationFrame(frame);
+    startLaptopCamera();
+    loadModels()
+      .then(() => {
+        if (video.videoWidth) status.textContent = 'Space를 눌러 불똥이를 추가해보세요';
+        detectLoop();
+      })
+      .catch(err => { status.textContent = 'AI 모델을 불러오지 못했어요: ' + err.message; });
+  </script>
+</body>
+</html>
