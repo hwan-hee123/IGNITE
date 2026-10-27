@@ -6,38 +6,61 @@
   <title>Camera</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      background: #111;
-      color: #eee;
-      font-family: sans-serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      gap: 16px;
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #111; }
+    body { color: #eee; font-family: sans-serif; }
+    #stage { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+    #video { display: none; }
+    #ui {
+      position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+      display: flex; gap: 8px; align-items: center;
+      background: rgba(0, 0, 0, 0.55); padding: 8px 12px; border-radius: 999px;
+      font-size: 13px; max-width: calc(100vw - 32px); flex-wrap: wrap; justify-content: center;
     }
-    video {
-      width: min(90vw, 960px);
-      aspect-ratio: 16 / 9;
-      background: #000;
-      border-radius: 12px;
-      transform: scaleX(-1);
-      object-fit: cover;
+    #ui button {
+      background: #ff7a1a; color: #fff; border: 0; border-radius: 999px;
+      padding: 6px 12px; font-size: 13px; cursor: pointer;
     }
-    #status { font-size: 14px; opacity: 0.7; }
+    #ui button.sub { background: rgba(255, 255, 255, 0.15); }
+    #status { opacity: 0.8; padding: 0 4px; }
+    body.clean #ui { display: none; }
   </style>
 </head>
 <body>
   <video id="video" autoplay playsinline muted></video>
-  <p id="status">카메라 연결 중...</p>
+  <canvas id="stage"></canvas>
+  <div id="ui">
+    <span id="status">카메라 연결 중...</span>
+    <button id="btnCapture">지금 인식 (Space)</button>
+    <button id="btnClear" class="sub">모두 지우기 (C)</button>
+    <button id="btnClean" class="sub">촬영 모드 (H)</button>
+    <button id="btnFull" class="sub">전체화면 (F)</button>
+  </div>
 
   <script>
     // 휴대폰/가상 카메라로 잡히는 장치 이름 (노트북 카메라만 쓰기 위해 제외)
     const EXCLUDE = /iphone|android|phone|continuity|link|droidcam|iriun|epoccam|virtual|obs|camo/i;
 
+    const MAX_SPRITES = 10;      // 화면에 동시에 뛰어다니는 불똥이 수
+    const PROC_W = 180;          // 인식용 축소 해상도 (가로)
+    const STABLE_NEEDED = 12;    // 약 1.2초 동안 그림이 가만히 있으면 인식
+
     const video = document.getElementById('video');
+    const stage = document.getElementById('stage');
+    const ctx = stage.getContext('2d');
     const status = document.getElementById('status');
+
+    const proc = document.createElement('canvas');
+    const pctx = proc.getContext('2d', { willReadFrequently: true });
+
+    let sprites = [];
+    let particles = [];
+    let showGuide = true;
+    let stableCount = 0;
+    let armed = true;            // 종이를 치웠다가 다시 보여줘야 다음 인식
+    let lastSeg = null;
+    let flash = 0;
+
+    // ---------- 카메라 ----------
 
     async function startLaptopCamera() {
       try {
@@ -58,12 +81,391 @@
           video: { deviceId: { exact: laptop.deviceId }, width: 1920, height: 1080 }
         });
         video.srcObject = stream;
-        status.textContent = '사용 중: ' + laptop.label;
+        status.textContent = '가운데 네모에 색칠한 불똥이를 보여주세요';
       } catch (err) {
         status.textContent = '카메라 오류: ' + err.message;
       }
     }
 
+    // ---------- 화면 좌표 ↔ 영상 좌표 ----------
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      stage.width = innerWidth * dpr;
+      stage.height = innerHeight * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    // 영상을 화면 가득 채우는(cover) 배치
+    function videoLayout() {
+      const cw = innerWidth, ch = innerHeight;
+      const vw = video.videoWidth, vh = video.videoHeight;
+      const s = Math.max(cw / vw, ch / vh);
+      return { s, ox: (cw - vw * s) / 2, oy: (ch - vh * s) / 2 };
+    }
+
+    // 화면 가운데 가이드 네모 (세로형 종이 비율)
+    function guideBox() {
+      const h = innerHeight * 0.62;
+      const w = h * 0.75;
+      return { x: (innerWidth - w) / 2, y: (innerHeight - h) / 2 - innerHeight * 0.03, w, h };
+    }
+
+    // 가이드 네모가 영상(좌우반전 전 원본)의 어느 부분인지
+    function guideInVideo() {
+      const g = guideBox(), L = videoLayout();
+      const xUnmirrored = innerWidth - g.x - g.w;
+      return {
+        x: (xUnmirrored - L.ox) / L.s,
+        y: (g.y - L.oy) / L.s,
+        w: g.w / L.s,
+        h: g.h / L.s
+      };
+    }
+
+    // ---------- 그림 분리 (흰 종이 배경 제거) ----------
+
+    function segment(data, w, h) {
+      const n = w * h;
+      const lum = new Float32Array(n);
+      const white = new Uint8Array(n);
+      const hist = new Uint32Array(256);
+
+      for (let i = 0; i < n; i++) {
+        const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+        const l = 0.299 * r + 0.587 * g + 0.114 * b;
+        lum[i] = l;
+        hist[l | 0]++;
+      }
+      // 종이 밝기 = 밝은 쪽 상위 10% 지점 (조명에 따라 자동 보정)
+      let acc = 0, paper = 255;
+      for (let v = 255; v >= 0; v--) {
+        acc += hist[v];
+        if (acc >= n * 0.1) { paper = v; break; }
+      }
+      paper = Math.max(paper, 60);
+
+      let whiteCount = 0;
+      for (let i = 0; i < n; i++) {
+        const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+        const sat = Math.max(r, g, b) - Math.min(r, g, b);
+        if (lum[i] > paper * 0.72 && sat < 25 + paper * 0.12) {
+          white[i] = 1;
+          whiteCount++;
+        }
+      }
+
+      // 테두리에서 시작해 닿는 곳 = 배경 (종이 바깥 + 종이를 잡은 손 + 흰 종이)
+      // 바깥 → 흰 종이로는 들어가지만, 흰 종이 → 색칠한 그림으로는 넘어가지 않음
+      const bg = new Uint8Array(n);
+      const queue = new Int32Array(n);
+      {
+        let head = 0, tail = 0;
+        const push = (i, from) => {
+          if (!bg[i] && (from < 0 || !white[from] || white[i])) { bg[i] = 1; queue[tail++] = i; }
+        };
+        for (let x = 0; x < w; x++) { push(x, -1); push((h - 1) * w + x, -1); }
+        for (let y = 0; y < h; y++) { push(y * w, -1); push(y * w + w - 1, -1); }
+        while (head < tail) {
+          const i = queue[head++], x = i % w;
+          if (x > 0) push(i - 1, i);
+          if (x < w - 1) push(i + 1, i);
+          if (i >= w) push(i - w, i);
+          if (i < n - w) push(i + w, i);
+        }
+      }
+
+      // 남은 덩어리 중 너무 작은 점(잡티)은 제거
+      const mask = new Uint8Array(n);
+      const minArea = n * 0.004;
+      let area = 0, x0 = w, y0 = h, x1 = -1, y1 = -1;
+      const seen = new Uint8Array(n);
+      for (let s = 0; s < n; s++) {
+        if (bg[s] || seen[s]) continue;
+        let head = 0, tail = 0;
+        queue[tail++] = s; seen[s] = 1;
+        while (head < tail) {
+          const i = queue[head++], x = i % w;
+          const nb = [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i >= w ? i - w : -1, i < n - w ? i + w : -1];
+          for (const j of nb) {
+            if (j >= 0 && !bg[j] && !seen[j]) { seen[j] = 1; queue[tail++] = j; }
+          }
+        }
+        if (tail < minArea) continue;
+        for (let k = 0; k < tail; k++) {
+          const i = queue[k], x = i % w, y = (i / w) | 0;
+          mask[i] = 1;
+          if (x < x0) x0 = x; if (x > x1) x1 = x;
+          if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+        area += tail;
+      }
+
+      return {
+        mask, w, h,
+        paperFrac: whiteCount / n,
+        areaFrac: area / n,
+        bbox: x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }
+      };
+    }
+
+    function looksLikeDrawing(seg) {
+      return seg.bbox && seg.paperFrac > 0.3 && seg.areaFrac > 0.03 && seg.areaFrac < 0.6;
+    }
+
+    function analyzeFrame() {
+      if (!video.videoWidth) return null;
+      const r = guideInVideo();
+      const pw = PROC_W, ph = Math.round(PROC_W * r.h / r.w);
+      proc.width = pw; proc.height = ph;
+      pctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, pw, ph);
+      return segment(pctx.getImageData(0, 0, pw, ph).data, pw, ph);
+    }
+
+    // ---------- 인식된 그림 → 스프라이트 이미지 ----------
+
+    function makeSpriteImage(seg) {
+      const r = guideInVideo();
+      const scale = Math.min(1, 700 / r.h);
+      const fw = Math.round(r.w * scale), fh = Math.round(r.h * scale);
+
+      const full = document.createElement('canvas');
+      full.width = fw; full.height = fh;
+      const fctx = full.getContext('2d');
+      fctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, fw, fh);
+
+      // 저해상도 마스크를 부드럽게 키워서 알파로 사용
+      const m = document.createElement('canvas');
+      m.width = seg.w; m.height = seg.h;
+      const mctx = m.getContext('2d');
+      const md = mctx.createImageData(seg.w, seg.h);
+      for (let i = 0; i < seg.mask.length; i++) md.data[i * 4 + 3] = seg.mask[i] ? 255 : 0;
+      mctx.putImageData(md, 0, 0);
+      fctx.globalCompositeOperation = 'destination-in';
+      fctx.imageSmoothingEnabled = true;
+      fctx.drawImage(m, 0, 0, fw, fh);
+
+      const k = fw / seg.w, pad = 2 * k;
+      const bx = Math.max(0, seg.bbox.x * k - pad), by = Math.max(0, seg.bbox.y * k - pad);
+      const bw = Math.min(fw - bx, seg.bbox.w * k + pad * 2), bh = Math.min(fh - by, seg.bbox.h * k + pad * 2);
+      const out = document.createElement('canvas');
+      out.width = Math.round(bw); out.height = Math.round(bh);
+      out.getContext('2d').drawImage(full, bx, by, bw, bh, 0, 0, out.width, out.height);
+      return out;
+    }
+
+    // ---------- 뛰어다니는 불똥이 ----------
+
+    class Sprite {
+      constructor(img, x, y) {
+        this.img = img;
+        this.h = innerHeight * (0.2 + Math.random() * 0.06);
+        this.w = this.h * img.width / img.height;
+        this.x = x; this.y = y;
+        const a = Math.random() * Math.PI * 2;
+        this.speed = innerHeight * (0.18 + Math.random() * 0.12);
+        this.vx = Math.cos(a); this.vy = Math.sin(a);
+        this.hop = Math.random() * Math.PI;
+        this.hopRate = 7 + Math.random() * 3;
+        this.age = 0;
+        this.turnIn = 1 + Math.random() * 2;
+      }
+
+      update(dt) {
+        this.age += dt;
+        this.turnIn -= dt;
+        if (this.turnIn <= 0) {
+          // 가끔 방향을 바꿔서 이리저리 돌아다니게
+          const a = Math.atan2(this.vy, this.vx) + (Math.random() - 0.5) * 2.4;
+          this.vx = Math.cos(a); this.vy = Math.sin(a);
+          this.turnIn = 1 + Math.random() * 2.5;
+        }
+        const go = this.age < 0.6 ? 0 : 1;   // 등장 직후엔 잠깐 제자리
+        this.x += this.vx * this.speed * dt * go;
+        this.y += this.vy * this.speed * dt * go * 0.6;
+
+        const mx = this.w / 2, top = innerHeight * 0.25, bottom = innerHeight - 20;
+        if (this.x < mx) { this.x = mx; this.vx = Math.abs(this.vx); }
+        if (this.x > innerWidth - mx) { this.x = innerWidth - mx; this.vx = -Math.abs(this.vx); }
+        if (this.y < top) { this.y = top; this.vy = Math.abs(this.vy); }
+        if (this.y > bottom) { this.y = bottom; this.vy = -Math.abs(this.vy); }
+
+        const prev = Math.sin(this.hop);
+        this.hop += this.hopRate * dt;
+        // 착지할 때마다 불똥 튀기기
+        if (go && prev > 0 && Math.sin(this.hop) <= 0) spark(this.x, this.y, 6);
+      }
+
+      draw() {
+        const s = Math.abs(Math.sin(this.hop));
+        const lift = s * this.h * 0.18;
+        const squash = 1 + (1 - s) * 0.08;
+        const pop = Math.min(1, this.age / 0.35);
+        const appear = pop < 1 ? 1 + Math.sin(pop * Math.PI) * 0.25 : 1;
+
+        // 그림자
+        ctx.save();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+        ctx.beginPath();
+        ctx.ellipse(this.x, this.y, this.w * 0.35 * (1 - s * 0.3), this.h * 0.05, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        ctx.save();
+        ctx.translate(this.x, this.y - lift);
+        ctx.scale((this.vx < 0 ? -1 : 1) * pop * appear * squash, pop * appear / squash);
+        ctx.rotate(Math.sin(this.hop * 2) * 0.06);
+        ctx.drawImage(this.img, -this.w / 2, -this.h, this.w, this.h);
+        ctx.restore();
+      }
+    }
+
+    function spark(x, y, count) {
+      for (let i = 0; i < count; i++) {
+        const a = -Math.PI * Math.random();
+        const v = 60 + Math.random() * 140;
+        particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, r: 2 + Math.random() * 3 });
+      }
+    }
+
+    function addSprite(img) {
+      const g = guideBox();
+      sprites.push(new Sprite(img, g.x + g.w / 2, g.y + g.h * 0.85));
+      if (sprites.length > MAX_SPRITES) sprites.shift();
+      spark(g.x + g.w / 2, g.y + g.h / 2, 30);
+      flash = 1;
+    }
+
+    function capture(seg) {
+      seg = seg || analyzeFrame();
+      if (!seg || !seg.bbox) {
+        status.textContent = '그림을 찾지 못했어요. 흰 종이를 네모 안에 꽉 차게 보여주세요';
+        return;
+      }
+      addSprite(makeSpriteImage(seg));
+      armed = false;
+      stableCount = 0;
+      status.textContent = '인식 완료! 종이를 치우고 다음 그림을 보여주세요';
+    }
+
+    // ---------- 자동 인식 ----------
+
+    setInterval(() => {
+      const seg = analyzeFrame();
+      if (!seg) return;
+      const ok = looksLikeDrawing(seg);
+
+      if (!armed) {
+        // 종이를 치우면 다시 인식 준비
+        if (!ok) { armed = true; status.textContent = '가운데 네모에 색칠한 불똥이를 보여주세요'; }
+        lastSeg = seg;
+        return;
+      }
+
+      if (ok && lastSeg && lastSeg.bbox) {
+        const da = Math.abs(seg.areaFrac - lastSeg.areaFrac) / seg.areaFrac;
+        const cx = seg.bbox.x + seg.bbox.w / 2 - (lastSeg.bbox.x + lastSeg.bbox.w / 2);
+        const cy = seg.bbox.y + seg.bbox.h / 2 - (lastSeg.bbox.y + lastSeg.bbox.h / 2);
+        const still = da < 0.15 && Math.hypot(cx, cy) < seg.w * 0.05;
+        stableCount = still ? stableCount + 1 : Math.max(0, stableCount - 2);
+      } else {
+        stableCount = 0;
+      }
+      lastSeg = seg;
+
+      if (ok && stableCount > 0) status.textContent = '그대로 잠깐만 들고 있어주세요...';
+      if (stableCount >= STABLE_NEEDED) capture(seg);
+    }, 100);
+
+    // ---------- 그리기 ----------
+
+    let last = performance.now();
+    function frame(now) {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, 0, innerWidth, innerHeight);
+
+      if (video.videoWidth) {
+        const L = videoLayout();
+        ctx.save();
+        ctx.translate(innerWidth, 0);
+        ctx.scale(-1, 1);   // 거울처럼 좌우반전
+        ctx.drawImage(video, L.ox, L.oy, video.videoWidth * L.s, video.videoHeight * L.s);
+        ctx.restore();
+      }
+
+      if (showGuide) drawGuide();
+
+      sprites.sort((a, b) => a.y - b.y);
+      for (const s of sprites) { s.update(dt); s.draw(); }
+
+      for (const p of particles) {
+        p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 400 * dt; p.life -= dt * 1.6;
+      }
+      particles = particles.filter(p => p.life > 0);
+      for (const p of particles) {
+        ctx.fillStyle = `rgba(255, ${140 + p.life * 100 | 0}, 40, ${p.life})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * p.life + 0.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      if (flash > 0) {
+        ctx.fillStyle = `rgba(255, 255, 255, ${flash * 0.6})`;
+        ctx.fillRect(0, 0, innerWidth, innerHeight);
+        flash = Math.max(0, flash - dt * 3);
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    function drawGuide() {
+      const g = guideBox();
+      ctx.save();
+      ctx.lineWidth = 3;
+      ctx.setLineDash([14, 10]);
+      ctx.strokeStyle = armed ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.3)';
+      ctx.strokeRect(g.x, g.y, g.w, g.h);
+      ctx.setLineDash([]);
+
+      if (armed && stableCount > 0) {
+        // 인식 진행도
+        ctx.lineWidth = 8;
+        ctx.strokeStyle = '#ff7a1a';
+        ctx.beginPath();
+        ctx.arc(g.x + g.w / 2, g.y + g.h / 2, 40, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * stableCount / STABLE_NEEDED);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // ---------- 조작 ----------
+
+    function toggleClean() {
+      showGuide = !showGuide;
+      document.body.classList.toggle('clean', !showGuide);
+    }
+    function toggleFull() {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen();
+    }
+
+    document.getElementById('btnCapture').onclick = () => capture();
+    document.getElementById('btnClear').onclick = () => { sprites = []; };
+    document.getElementById('btnClean').onclick = toggleClean;
+    document.getElementById('btnFull').onclick = toggleFull;
+    addEventListener('keydown', e => {
+      if (e.code === 'Space') { e.preventDefault(); capture(); }
+      else if (e.key === 'c' || e.key === 'C') sprites = [];
+      else if (e.key === 'h' || e.key === 'H') toggleClean();
+      else if (e.key === 'f' || e.key === 'F') toggleFull();
+    });
+    addEventListener('resize', resize);
+
+    resize();
+    requestAnimationFrame(frame);
     startLaptopCamera();
   </script>
 </body>
