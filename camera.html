@@ -96,6 +96,19 @@
 
     body.clean .glass { opacity: 0; pointer-events: none; transform: translateX(-50%) scale(0.92); }
 
+    /* 스캔 중 안내 문구: Face ID 설정 화면처럼 틀 아래 크고 짧게 (위쪽 작은 캡슐은 숨김) */
+    #caption {
+      position: fixed; left: 50%; transform: translate(-50%, 6px);
+      max-width: calc(100vw - 32px); text-align: center; pointer-events: none;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Apple SD Gothic Neo", "Pretendard", "Malgun Gothic", system-ui, sans-serif;
+      font-size: clamp(20px, 2.4vw, 30px); font-weight: 600; letter-spacing: -0.02em;
+      color: rgba(255, 255, 255, 0.96); text-shadow: 0 1px 12px rgba(0, 0, 0, 0.35);
+      opacity: 0; transition: opacity 0.35s ease, transform 0.45s cubic-bezier(0.2, 1, 0.3, 1);
+    }
+    body.scanning #caption { opacity: 1; transform: translate(-50%, 0); }
+    body.scanning #status { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+    @media (prefers-reduced-motion: reduce) { #caption { transition: none; } }
+
     /* 접근성: 투명도 줄이기 / 대비 높이기 */
     @media (prefers-reduced-transparency: reduce) {
       .glass { background: rgba(30, 30, 32, 0.94); -webkit-backdrop-filter: none; backdrop-filter: none; }
@@ -113,6 +126,7 @@
   <video id="video" autoplay playsinline muted></video>
   <canvas id="stage"></canvas>
   <div id="status" class="glass" role="status" aria-live="polite">카메라 연결 중...</div>
+  <div id="caption" aria-hidden="true"></div>
   <div id="ui" class="glass" role="toolbar" aria-label="포토부스">
     <!-- 카메라는 자동으로 내장 카메라를 고름 (선택 목록은 화면에 안 보이게 남겨 둠) -->
     <select id="camSelect" aria-hidden="true" tabindex="-1" hidden></select>
@@ -136,13 +150,15 @@
     const MAX_SPRITES = 10;      // 화면에 동시에 뛰어다니는 불똥이 수
     const GUIDE_H = 0.55;        // 화면에 보이는 불똥이 틀의 키 (화면 높이 비율)
     const GUIDE_COLOR = '#FE3636';               // 불똥이 틀 테두리 색
-    // 네온 (Apple HIG: 배경 밝기에 맞춰 조절, 과하지 않게, 한 가지 색은 한 가지 의미로)
+    // 스캔 장면 (Face ID 등록 · Siri 화면 가장자리 빛 참고)
+    const SCAN_LINE_W = 2.5;     // 윤곽선 굵기 (px)
+    const SCAN_LINE_W_BOLD = 4;  // '대비 높이기' 설정일 때 윤곽선 굵기
+    const EDGE_GLOW = [[110, 0.06], [60, 0.1], [28, 0.16], [10, 0.28]];   // 화면 가장자리 불빛 [굵기 px, 세기]
+    // WebGL이 안 될 때 쓰는 간단한 유리의 테두리
     const GUIDE_STROKE = 3;      // 선 굵기 (px)
-    const GUIDE_STROKE_BOLD = 5; // '대비 높이기' 설정일 때 선 굵기 (이때는 빛 없이 선만)
-    const NEON_GLOW = [[28, 0.9], [12, 0.9], [4, 1]];   // 빛 퍼짐 [흐림 px, 세기] (넓게 → 좁게)
+    const GUIDE_STROKE_BOLD = 5; // '대비 높이기' 설정일 때 선 굵기
+    const NEON_GLOW = [[28, 0.9], [12, 0.9], [4, 1]];   // 빛 퍼짐 [흐림 px, 세기]
     const GLOW_PAD = 60;         // 빛이 퍼질 여백 (px)
-    const GLOW_DARK_BG = 0.85;   // 어두운 배경에서 빛 세기 (빛이 더 또렷해 보여서 더하기 합성)
-    const GLOW_BRIGHT_BG = 0.5;  // 밝은 배경에서 빛 세기 (더하기 합성은 분홍으로 바래서 일반 합성)
     const WORK_W = 200;          // 인식용 축소 해상도 (가로)
     const MARGIN = 0.15;         // 틀 바깥으로 얼마나 더 보고 판단할지 (틀 크기 비율)
     const COVER_OK = 0.8;        // 틀 안이 불똥이로 이만큼 차 있어야 함
@@ -171,14 +187,14 @@
     const BLINK_MS = 140;        // 셔터처럼 살짝 어두워지는 시간
     const BLINK_DARK = 0.25;     // 그때 어두워지는 정도
     const RELEASE_S = 0.45;      // 찍힌 뒤 유리가 풀리며 사라지는 시간
-    // 리퀴드 글라스 (WebGL) — 하단 바와 같은 regular 변형 (젖빛 + 어두운 틴트)
-    const GLASS_BEVEL = 0.05;    // 구멍 가장자리 둥근 경사면 폭 (틀 키 비율)
-    const GLASS_REFRACT_PX = 16; // 경사면에서 뒤 화면이 휘는 정도 (px)
-    const GLASS_FROST = 3.8;     // 판의 흐림 정도 (하단 바 blur(22px) 수준)
+    // 틀 밖 배경 (WebGL) — 짙고 흐린 어두운 소재: 빛이 틀 안 불똥이에게 모이게
+    const GLASS_BEVEL = 0.04;    // 구멍 가장자리 둥근 경사면 폭 (틀 키 비율)
+    const GLASS_REFRACT_PX = 6;  // 경사면에서 뒤 화면이 휘는 정도 (px, 아주 살짝만)
+    const GLASS_FROST = 4.2;     // 판의 흐림 정도
     const GLASS_FROST_SOLID = 5.5; // '투명도 줄이기' 설정일 때 흐림 정도
-    const GLASS_SAT = 1.8;       // 채도 (하단 바 saturate(180%))
-    const GLASS_TINT_DARK = 0.32; // 어두운 회색 틴트 세기 (하단 바 배경 rgba(30,30,32,0.32))
-    const GLASS_SHADOW = 0.35;   // 구멍 안 그림자 (유리판이 떠 있는 느낌)
+    const GLASS_SAT = 1.15;      // 채도 (색이 튀지 않게 거의 그대로)
+    const GLASS_TINT_DARK = 0.58; // 어두운 틴트 세기 (클수록 틀 밖이 어두워짐)
+    const GLASS_SHADOW = 0.22;   // 구멍 안 그림자 (유리판이 떠 있는 느낌)
     const GLASS_MAG = 1.0;       // 유리 뒤 화면 확대 (1 = 확대 없음, 키우면 화면이 커져 보임)
     const GLASS_DIM_MAX = 0.35;  // 밝은 배경일 때 어둡게 하는 막 (HIG 권장 35%)
     // WebGL이 안 될 때 쓰는 간단한 유리
@@ -201,6 +217,7 @@
     const stage = document.getElementById('stage');
     const ctx = stage.getContext('2d');
     const status = document.getElementById('status');
+    const caption = document.getElementById('caption');
     const camSelect = document.getElementById('camSelect');
 
     const work = document.createElement('canvas');
@@ -282,9 +299,61 @@
       g.translate(guideSil.width, 0);
       g.scale(-1, 1);
       g.drawImage(silhouette, 0, 0);
+      contour = buildContour();
     };
     silhouette.src = 'silhouette.png?v=' + Date.now();   // 바꾼 실루엣이 예전 것으로 보이지 않게 항상 새로 받음
     const ASPECT = 0.763;        // 실루엣 가로/세로 비율
+
+    // 불똥이 윤곽선 (화면에 보이는 모양, 0~1 좌표). 맨 위 불꽃 끝에서 시작해
+    // 오른쪽으로 도는 길(a)과 왼쪽으로 도는 길(b)로 나눠, 스캔하면서 두 길이 아래에서 만나게 그림
+    let contour = null;
+    function buildContour() {
+      const H = 260, W = Math.round(H * ASPECT), w = W + 2, h = H + 2;
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const cc = c.getContext('2d', { willReadFrequently: true });
+      cc.drawImage(guideSil, 1, 1, W, H);
+      const d = cc.getImageData(0, 0, w, h).data;
+      const inside = (x, y) => x >= 0 && y >= 0 && x < w && y < h && d[(y * w + x) * 4 + 3] > 127;
+
+      // 맨 위(불꽃 끝) 픽셀에서 시작해 테두리를 따라 한 바퀴 (Moore 경계 추적, 시계 방향)
+      let sx = -1, sy = -1;
+      find: for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (inside(x, y)) { sx = x; sy = y; break find; }
+      const dirs = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+      const raw = [[sx, sy]];
+      let cx = sx, cy = sy, start = 0;
+      for (let it = 0; it < w * h; it++) {
+        let moved = false;
+        for (let k = 0; k < 8; k++) {
+          const di = (start + k) % 8, nx = cx + dirs[di][0], ny = cy + dirs[di][1];
+          if (inside(nx, ny)) { cx = nx; cy = ny; start = (di + 6) % 8; moved = true; break; }
+        }
+        if (!moved || (cx === sx && cy === sy)) break;
+        raw.push([cx, cy]);
+      }
+
+      // 계단 모양을 줄이려고 듬성듬성 고른 뒤 두 번 부드럽게 (Chaikin)
+      let pts = raw.filter((_, i) => i % 3 === 0);
+      for (let pass = 0; pass < 2; pass++) {
+        const out = [];
+        for (let i = 0; i < pts.length; i++) {
+          const p = pts[i], q = pts[(i + 1) % pts.length];
+          out.push([p[0] * 0.75 + q[0] * 0.25, p[1] * 0.75 + q[1] * 0.25], [p[0] * 0.25 + q[0] * 0.75, p[1] * 0.25 + q[1] * 0.75]);
+        }
+        pts = out;
+      }
+      const norm = pts.map(([x, y]) => ({ x: (x - 1) / W, y: (y - 1) / H }));
+
+      // 두 갈래: 둘레 길이의 절반 지점(아래 가운데쯤)에서 만남
+      const seg = (p, q) => Math.hypot((p.x - q.x) * ASPECT, p.y - q.y);
+      let total = 0;
+      for (let i = 0; i < norm.length; i++) total += seg(norm[i], norm[(i + 1) % norm.length]);
+      let acc = 0, mid = 0;
+      while (mid < norm.length - 1 && acc < total / 2) { acc += seg(norm[mid], norm[mid + 1]); mid++; }
+      const a = norm.slice(0, mid + 1);
+      const b = norm.slice(mid).concat([norm[0]]).reverse();
+      return { all: norm, a, b };
+    }
 
     // 화면에 그리는 틀 위치
     function guideBox() {
@@ -1021,7 +1090,9 @@
 
     // ---------- 인식 → 캡처 ----------
 
+    let capturedAt = -1e9;   // 마지막으로 찍힌 시각 (윤곽선이 강조색으로 완성되는 연출용)
     function capture() {
+      capturedAt = performance.now();
       if (!video.videoWidth) return;
       const g = guideBox();
       // 틀 안의 불똥이가 살짝 떠올랐다가 화면으로 튀어나옴 (불꽃은 떠오른 뒤 Sprite가 터뜨림)
@@ -1055,7 +1126,7 @@
           }
 
           if (armed && inside) {
-            status.textContent = '좋아요! 그대로 잠깐만...';
+            status.textContent = '그대로 잠시만 기다려주세요';
             // 인식이 안정된 뒤에도 잠깐(CAPTURE_DELAY_MS) 기다렸다가 찍음 → 그동안 유리가 서서히 짙어짐
             if (stableCount >= STABLE_NEEDED) {
               if (!readyAt) readyAt = performance.now();
@@ -1421,30 +1492,69 @@
       ctx.globalAlpha = 1;
     }
 
-    function drawGuide(g) {
-      const img = guideImages(g.w, g.h);
-      // 네온: 깔끔한 선 하나 + 틀 바깥으로만 은은하게 퍼지는 빛 (같은 빨강)
-      // 스캔이 진행될수록 색은 그대로 두고 빛만 밝아짐 (한 가지 색 = 한 가지 의미)
-      const base = (armed ? 1 : 0.4) * presence;
-      const x = g.x - 6, y = g.y - 6;
+    // 스캔 윤곽선 (Face ID 등록 화면처럼)
+    //  - 희미한 흰 윤곽이 먼저 보이고, 스캔이 진행될수록 불꽃 끝에서 양쪽으로 흰 선이 그려져 아래에서 만남
+    //  - 다 그려지면(찍히는 순간) 강조색으로 바뀌고, 닫힐 때 불똥이 쪽으로 살짝 조여들며 사라짐
+    function drawScanOutline(g) {
+      if (!contour) return;
+      const now = performance.now();
+      const justCaptured = !guideOn && now - capturedAt < RELEASE_S * 1000 + 100;
+      const progress = justCaptured ? 1 : glow;
+      const shrink = guideOn ? 1 : 0.9 + 0.1 * presence;
+      const cx = g.x + g.w / 2, cy = g.y + g.h / 2;
+      const toXY = p => [cx + (g.x + p.x * g.w - cx) * shrink, cy + (g.y + p.y * g.h - cy) * shrink];
+      const build = pts => {
+        const path = new Path2D();
+        let len = 0, px = 0, py = 0;
+        pts.forEach((p, i) => {
+          const [x, y] = toXY(p);
+          if (i) { path.lineTo(x, y); len += Math.hypot(x - px, y - py); } else path.moveTo(x, y);
+          px = x; py = y;
+        });
+        return { path, len };
+      };
+      const lineW = highContrast ? SCAN_LINE_W_BOLD : SCAN_LINE_W;
       ctx.save();
-      if (highContrast) {
-        // 대비 높이기: 빛 없이 두꺼운 선만
-        ctx.globalAlpha = base;
-        ctx.drawImage(img.bold, x, y);
-        ctx.restore();
-        return;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.lineWidth = lineW;
+      // 바탕: 희미한 전체 윤곽
+      const all = build(contour.all.concat([contour.all[0]]));
+      ctx.globalAlpha = presence * (highContrast ? 0.6 : 0.32);
+      ctx.strokeStyle = '#fff';
+      ctx.stroke(all.path);
+      // 진행: 양쪽에서 그려 내려감
+      if (progress > 0.002) {
+        ctx.globalAlpha = presence;
+        ctx.strokeStyle = justCaptured ? GUIDE_COLOR : '#fff';
+        if (!highContrast) { ctx.shadowColor = justCaptured ? 'rgba(254, 54, 54, 0.6)' : 'rgba(255, 255, 255, 0.55)'; ctx.shadowBlur = 8; }
+        for (const half of [contour.a, contour.b]) {
+          const { path, len } = build(half);
+          ctx.setLineDash([len * progress, len + 10]);
+          ctx.stroke(path);
+        }
       }
-      const breathe = reduceMotion ? 1 : 0.92 + 0.08 * Math.sin(performance.now() / 1000 * 2.0);
-      const intensity = (0.6 + 0.4 * glow) * breathe;
-      // 어두운 배경: 더하기 합성으로 또렷하게 / 밝은 배경: 일반 합성으로 색이 바래지 않게
-      const bright = bgLum > 0.55;
-      ctx.globalCompositeOperation = bright ? 'source-over' : 'lighter';
-      ctx.globalAlpha = base * intensity * (bright ? GLOW_BRIGHT_BG : GLOW_DARK_BG);
-      ctx.drawImage(img.glow, x - GLOW_PAD, y - GLOW_PAD);
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = base;
-      ctx.drawImage(img.ring, x, y);
+      ctx.restore();
+    }
+
+    // 화면 가장자리 불빛 (Siri처럼): 불 색 그라데이션이 천천히 돌며 숨 쉬듯, 불똥이가 들어오면 더 밝게
+    function drawEdgeGlow(amount, t) {
+      if (amount < 0.01 || highContrast) return;
+      const W = innerWidth, H = innerHeight, R = Math.hypot(W, H) / 2;
+      const ang = reduceMotion ? -0.8 : t * 0.35;
+      const gr = ctx.createLinearGradient(W / 2 + Math.cos(ang) * R, H / 2 + Math.sin(ang) * R, W / 2 - Math.cos(ang) * R, H / 2 - Math.sin(ang) * R);
+      gr.addColorStop(0, '#FE3636');
+      gr.addColorStop(0.35, '#FF7A3D');
+      gr.addColorStop(0.65, '#FFC15E');
+      gr.addColorStop(1, '#FE3636');
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = gr;
+      for (const [lw, a] of EDGE_GLOW) {   // 굵고 옅은 빛부터 가늘고 진한 빛까지 겹쳐 부드럽게 번지게
+        ctx.globalAlpha = amount * a;
+        ctx.lineWidth = lw;
+        ctx.strokeRect(0, 0, W, H);
+      }
       ctx.restore();
     }
 
@@ -1486,15 +1596,24 @@
         drawVideo(ctx, 0);
         if (showGuide && liquidGlass) {
           try {
-            ctx.drawImage(liquidGlass.render(g, Math.min(1, Math.max(0, pe)), glow, scan, now / 1000), 0, 0, innerWidth, innerHeight);
+            // 틀 밖: 짙고 흐린 어두운 소재 (색 테두리 빛 없이 → glow 0)
+            ctx.drawImage(liquidGlass.render(g, Math.min(1, Math.max(0, pe)), 0, scan, now / 1000), 0, 0, innerWidth, innerHeight);
           } catch (e) {
             console.error('리퀴드 글라스 오류, 간단한 유리로 바꿀게요', e);
             liquidGlass = null;
           }
-          drawGuide(g);   // 유리 위에 불똥이 모양 테두리를 또렷하게
         } else if (showGuide) {
           drawGlass2D(g, presence);
-          drawGuide(g);
+        }
+        // 스캔 중엔 틀 아래 큰 안내 문구 (위쪽 상태 문구와 같은 내용)
+        document.body.classList.toggle('scanning', guideOn);
+        if (guideOn && caption.textContent !== status.textContent) caption.textContent = status.textContent;
+        const capTop = Math.round(g.y + g.h + 28);
+        if (caption.dataset.top !== String(capTop)) { caption.style.top = capTop + 'px'; caption.dataset.top = capTop; }
+        if (showGuide) {
+          const breathe = reduceMotion ? 1 : 0.85 + 0.15 * Math.sin(now / 1000 * 1.6);
+          drawEdgeGlow(presence * (0.55 + 0.45 * glow) * breathe, now / 1000);
+          drawScanOutline(g);
         }
       }
       if (debug) drawDebug();
