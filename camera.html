@@ -56,6 +56,10 @@
     const COVER_OK = 0.8;        // 틀 안이 불똥이로 이만큼 차 있어야 함
     const SPILL_MAX = 0.4;       // 틀 밖으로 삐져나온 부분은 이만큼까지만 (배경·벽이 통째로 잡히는 것 거르기)
     const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 캡처 (약 1초)
+    const MOTION_NEAR = 0.08;    // 틀 부분 화면이 이만큼 바뀌면 "뭔가 다가왔다"
+    const HAND_NEAR = 0.12;      // 손 크기가 화면의 이 비율보다 크면 "카메라 가까이"
+    const NEAR_HOLD_MS = 2500;   // 다가온 뒤 틀을 유지하는 시간
+    const DIM = 0.55;            // 틀이 뜰 때 주변을 어둡게 하는 정도 (0~1)
 
     const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
     const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite';
@@ -89,7 +93,10 @@
     let armed = true;            // 불똥이를 틀에서 뺐다가 다시 넣어야 다음 인식
     let missCount = 0;
     let flash = 0;
-    let focus = 0;               // 주변 블러 정도 (0~1)
+    let focus = 0;               // 불똥이가 틀에 들어온 정도 (0~1)
+    let presence = 0;            // 틀이 보이는 정도 (0~1)
+    let nearUntil = 0;           // 이 시각까지 "뭔가 다가와 있음"
+    let prevGray = null;         // 움직임 비교용 이전 화면
 
     // ---------- 불똥이 실루엣 (틀) ----------
 
@@ -212,7 +219,7 @@
           catch (e) { track = await openCamera(); }   // 실패하면 기본 카메라 유지
         }
         camSelect.value = track.getSettings().deviceId;
-        if (segmenter) status.textContent = '불똥이를 틀 안에 맞춰 넣어주세요';
+        if (segmenter) status.textContent = '불똥이를 들고 가까이 와서 틀에 맞춰주세요';
       } catch (err) {
         status.textContent = CAMERA_ERRORS[err.name] || ('카메라 오류: ' + err.name + ' ' + err.message);
       }
@@ -272,6 +279,7 @@
       }
       // 손 크기(손목~가운데 손가락 뿌리) 대비 엄지 끝~검지 끝 거리
       const size = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 1;
+      if (size > HAND_NEAR) markNear();   // 손이 카메라 가까이 오면 틀 띄우기
       const gap = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) / size;
       const p = toScreen({ x: (lm[4].x + lm[8].x) / 2, y: (lm[4].y + lm[8].y) / 2 });
 
@@ -364,8 +372,22 @@
       const w = WORK_W, h = Math.round(WORK_W * r.h / r.w);
       if (work.width !== w || work.height !== h) { work.width = w; work.height = h; }
       wctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, w, h);
-      const t = tplGrid(w, h);
 
+      // 가운데에서 뭔가 움직이면 "다가왔다"로 보고 잠시 동안 틀을 띄움
+      const d = wctx.getImageData(0, 0, w, h).data;
+      const gray = new Uint8Array(w * h);
+      let moved = 0;
+      for (let i = 0; i < gray.length; i++) {
+        gray[i] = (d[i * 4] * 77 + d[i * 4 + 1] * 150 + d[i * 4 + 2] * 29) >> 8;
+        if (prevGray && prevGray.length === gray.length && Math.abs(gray[i] - prevGray[i]) > 25) moved++;
+      }
+      prevGray = gray;
+      if (moved / gray.length > MOTION_NEAR) markNear();
+
+      // 아무것도 안 다가왔으면 AI 인식은 쉬기
+      if (performance.now() > nearUntil) { lastInfo = null; return false; }
+
+      const t = tplGrid(w, h);
       let best = null;
       for (const [px, py] of [[0.5, 0.55], [0.5, 0.4]]) {   // 몸통 가운데, 조금 위
         const mask = segmentAt(w, h, px, py);
@@ -382,8 +404,11 @@
         }
       }
       lastInfo = best;
+      if (best && best.ok) markNear();   // 틀 안에 들어와 있는 동안은 계속 띄움
       return !!(best && best.ok);
     }
+
+    function markNear() { nearUntil = performance.now() + NEAR_HOLD_MS; }
 
     // ---------- 틀 안의 불똥이 → 스프라이트 이미지 ----------
 
@@ -541,7 +566,7 @@
           } else if (++missCount >= 3) {
             inside = false;
             stableCount = 0;
-            if (!armed) { armed = true; status.textContent = '불똥이를 틀 안에 맞춰 넣어주세요'; }
+            if (!armed) { armed = true; status.textContent = '불똥이를 들고 가까이 와서 틀에 맞춰주세요'; }
           }
 
           if (armed && inside) {
@@ -555,46 +580,38 @@
 
     // ---------- 그리기 ----------
 
-    function drawVideo(blur) {
+    function drawVideo() {
       const L = videoLayout();
       ctx.save();
       ctx.translate(innerWidth, 0);
       ctx.scale(-1, 1);   // 거울처럼 좌우반전
-      if (blur > 0) ctx.filter = `blur(${blur}px)`;
       ctx.drawImage(video, L.ox, L.oy, video.videoWidth * L.s, video.videoHeight * L.s);
       ctx.restore();
     }
 
-    // 틀 안만 또렷하게 (주변이 흐려질 때)
-    const fx = document.createElement('canvas');
-    const fxc = fx.getContext('2d');
-    function drawSharpInside(g) {
-      const L = videoLayout();
-      fx.width = Math.round(g.w); fx.height = Math.round(g.h);
-      fxc.save();
-      fxc.translate(fx.width, 0);
-      fxc.scale(-1, 1);
-      const r = guideInVideo(0);
-      fxc.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, fx.width, fx.height);
-      fxc.restore();
-      fxc.globalCompositeOperation = 'destination-in';
-      fxc.drawImage(guideSil, 0, 0, fx.width, fx.height);
-      fxc.globalCompositeOperation = 'source-over';
-      ctx.drawImage(fx, g.x, g.y, g.w, g.h);
+    // 틀 바깥만 반투명하게 어둡게 (틀 모양으로 구멍 뚫린 막)
+    const dim = document.createElement('canvas');
+    const dimc = dim.getContext('2d');
+    function drawDim(g, alpha) {
+      if (dim.width !== innerWidth || dim.height !== innerHeight) { dim.width = innerWidth; dim.height = innerHeight; }
+      dimc.globalCompositeOperation = 'source-over';
+      dimc.clearRect(0, 0, dim.width, dim.height);
+      dimc.fillStyle = `rgba(0, 0, 0, ${alpha})`;
+      dimc.fillRect(0, 0, dim.width, dim.height);
+      dimc.globalCompositeOperation = 'destination-out';
+      dimc.drawImage(guideSil, g.x, g.y, g.w, g.h);
+      ctx.drawImage(dim, 0, 0, innerWidth, innerHeight);
     }
 
     function drawGuide(g) {
       const img = guideImages(g.w, g.h);
       const progress = armed && inside ? Math.min(1, stableCount / STABLE_NEEDED) : 0;
       ctx.save();
-      // 틀 안을 살짝 밝게 (불똥이가 들어오면 사라짐)
-      ctx.globalAlpha = 0.12 * (1 - focus);
-      ctx.drawImage(img.fill, g.x - 6, g.y - 6);
-      // 테두리: 흰색 → 불똥이가 들어오면 주황으로 빛남
-      ctx.globalAlpha = (armed ? 0.85 : 0.35) * (1 - progress);
+      // 테두리: 흰색 → 불똥이가 들어오면 주황으로 빛남 (다가왔을 때만 보임)
+      ctx.globalAlpha = (armed ? 0.85 : 0.35) * (1 - progress) * presence;
       ctx.drawImage(img.ring, g.x - 6, g.y - 6);
       if (progress > 0) {
-        ctx.globalAlpha = progress;
+        ctx.globalAlpha = progress * presence;
         ctx.shadowColor = '#ff7a1a';
         ctx.shadowBlur = 10 + progress * 25;
         ctx.drawImage(img.hot, g.x - 6, g.y - 6);
@@ -610,16 +627,18 @@
       ctx.fillStyle = '#111';
       ctx.fillRect(0, 0, innerWidth, innerHeight);
 
-      // 불똥이가 틀에 들어오면 주변이 서서히 흐려짐
+      // 뭔가 다가오면 틀이 서서히 나타나고, 불똥이가 들어오면 주변이 더 어두워짐
+      const near = performance.now() < nearUntil;
+      presence += ((near ? 1 : 0) - presence) * Math.min(1, dt * (near ? 6 : 2));
       const target = armed && inside ? Math.min(1, stableCount / STABLE_NEEDED + 0.3) : 0;
       focus += (target - focus) * Math.min(1, dt * 6);
 
       const g = guideBox();
-      if (video.videoWidth) {
-        drawVideo(focus * 14);
-        if (focus > 0.05) drawSharpInside(g);
+      if (video.videoWidth) drawVideo();
+      if (guideSil.width && showUI && presence > 0.01) {
+        drawDim(g, presence * DIM * (0.7 + focus * 0.3));
+        drawGuide(g);
       }
-      if (guideSil.width && showUI) drawGuide(g);
       if (debug) drawDebug();
 
       updateHands(now, dt);
@@ -709,7 +728,7 @@
     startLaptopCamera();
     loadModels()
       .then(() => {
-        if (video.videoWidth) status.textContent = '불똥이를 틀 안에 맞춰 넣어주세요';
+        if (video.videoWidth) status.textContent = '불똥이를 들고 가까이 와서 틀에 맞춰주세요';
         detectLoop();
       })
       .catch(err => { status.textContent = 'AI 모델을 불러오지 못했어요: ' + err.message; });
