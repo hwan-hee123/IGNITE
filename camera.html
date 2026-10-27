@@ -56,8 +56,9 @@
     const COVER_OK = 0.8;        // 틀 안이 불똥이로 이만큼 차 있어야 함
     const SPILL_MAX = 0.4;       // 틀 밖으로 삐져나온 부분은 이만큼까지만 (배경·벽이 통째로 잡히는 것 거르기)
     const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 캡처 (약 1초)
-    const BLUR = 6;              // 틀이 뜰 때 배경 흐림 정도 (px)
-    const DIM = 0.15;            // 틀이 뜰 때 배경을 살짝 어둡게 하는 정도 (0~1)
+    const GLASS_BLUR = 8;        // 틀 바깥 유리의 흐림 정도 (px)
+    const GLASS_TINT = 0.14;     // 유리의 우윳빛 정도 (0~1)
+    const GLASS_REFRACT = 1.06;  // 유리 두께로 살짝 확대돼 보이는 정도
 
     const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
     const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite';
@@ -108,7 +109,7 @@
       g.drawImage(silhouette, 0, 0);
     };
     silhouette.src = 'silhouette.png';
-    const ASPECT = 0.761;        // 실루엣 가로/세로 비율
+    const ASPECT = 0.762;        // 실루엣 가로/세로 비율
 
     // 화면에 그리는 틀 위치
     function guideBox() {
@@ -578,25 +579,61 @@
       c.restore();
     }
 
-    // 틀이 뜨면: 배경은 살짝 흐리고 어둡게, 틀 안은 또렷하게
-    const sharp = document.createElement('canvas');
-    const sharpc = sharp.getContext('2d');
-    function drawFocusedBackground(g, amount) {
-      drawVideo(ctx, amount * BLUR);
-      ctx.fillStyle = `rgba(0, 0, 0, ${amount * DIM})`;
-      ctx.fillRect(0, 0, innerWidth, innerHeight);
+    // 리퀴드 글라스: 틀 바깥을 두껍고 반투명한 유리판처럼 (틀 모양으로 구멍, 틀 안은 또렷)
+    const low = document.createElement('canvas');
+    const lowc = low.getContext('2d');
+    const glass = document.createElement('canvas');
+    const glassc = glass.getContext('2d');
+    function drawGlass(g, amount) {
+      // 1) 영상을 작게 줄였다가 키워서 부드럽게 흐림 (큰 blur보다 가벼움)
+      const k = 0.1;
+      const lw = Math.max(32, Math.round(innerWidth * k)), lh = Math.max(18, Math.round(innerHeight * k));
+      if (low.width !== lw || low.height !== lh) { low.width = lw; low.height = lh; }
+      lowc.setTransform(lw / innerWidth, 0, 0, lh / innerHeight, 0, 0);
+      drawVideo(lowc, 0);
+
       const dpr = window.devicePixelRatio || 1;
-      if (sharp.width !== Math.round(innerWidth * dpr) || sharp.height !== Math.round(innerHeight * dpr)) {
-        sharp.width = Math.round(innerWidth * dpr); sharp.height = Math.round(innerHeight * dpr);
-      }
-      sharpc.setTransform(dpr, 0, 0, dpr, 0, 0);
-      sharpc.globalCompositeOperation = 'source-over';
-      sharpc.clearRect(0, 0, innerWidth, innerHeight);
-      drawVideo(sharpc, 0);
-      sharpc.globalCompositeOperation = 'destination-in';
-      sharpc.drawImage(guideSil, g.x, g.y, g.w, g.h);
+      const gw = Math.round(innerWidth * dpr), gh = Math.round(innerHeight * dpr);
+      if (glass.width !== gw || glass.height !== gh) { glass.width = gw; glass.height = gh; }
+      glassc.setTransform(dpr, 0, 0, dpr, 0, 0);
+      glassc.globalCompositeOperation = 'source-over';
+      glassc.clearRect(0, 0, innerWidth, innerHeight);
+
+      // 2) 유리 두께만큼 살짝 확대(굴절) + 밝고 선명한 색
+      const rw = innerWidth * GLASS_REFRACT, rh = innerHeight * GLASS_REFRACT;
+      glassc.save();
+      glassc.filter = `blur(${GLASS_BLUR}px) saturate(1.6) brightness(1.08)`;
+      glassc.drawImage(low, (innerWidth - rw) / 2, (innerHeight - rh) / 2, rw, rh);
+      glassc.restore();
+
+      // 3) 우윳빛 틴트 + 빛 반사 (왼쪽 위가 밝고 오른쪽 아래로 흐려짐)
+      glassc.fillStyle = `rgba(255, 255, 255, ${GLASS_TINT})`;
+      glassc.fillRect(0, 0, innerWidth, innerHeight);
+      const sheen = glassc.createLinearGradient(0, 0, innerWidth, innerHeight);
+      sheen.addColorStop(0, 'rgba(255, 255, 255, 0.22)');
+      sheen.addColorStop(0.35, 'rgba(255, 255, 255, 0.02)');
+      sheen.addColorStop(0.7, 'rgba(255, 255, 255, 0)');
+      sheen.addColorStop(1, 'rgba(255, 255, 255, 0.08)');
+      glassc.fillStyle = sheen;
+      glassc.fillRect(0, 0, innerWidth, innerHeight);
+
+      // 4) 틀 모양으로 구멍
+      glassc.globalCompositeOperation = 'destination-out';
+      glassc.drawImage(guideSil, g.x, g.y, g.w, g.h);
+
+      // 5) 구멍 가장자리에 유리 단면이 빛나는 느낌
+      const img = guideImages(g.w, g.h);
+      glassc.globalCompositeOperation = 'source-over';
+      glassc.save();
+      glassc.shadowColor = 'rgba(255, 255, 255, 0.9)';
+      glassc.shadowBlur = 16;
+      glassc.globalAlpha = 0.6;
+      glassc.drawImage(img.ring, g.x - 6, g.y - 6);
+      glassc.restore();
+
+      drawVideo(ctx, 0);
       ctx.globalAlpha = amount;
-      ctx.drawImage(sharp, 0, 0, innerWidth, innerHeight);
+      ctx.drawImage(glass, 0, 0, innerWidth, innerHeight);
       ctx.globalAlpha = 1;
     }
 
@@ -624,7 +661,7 @@
       ctx.fillStyle = '#111';
       ctx.fillRect(0, 0, innerWidth, innerHeight);
 
-      // Space로 틀을 띄우면 서서히 나타나고 배경이 살짝 흐려짐
+      // Space로 틀을 띄우면 틀 바깥이 리퀴드 글라스로 서서히 덮임
       presence += ((guideOn ? 1 : 0) - presence) * Math.min(1, dt * 6);
       const target = armed && inside ? Math.min(1, stableCount / STABLE_NEEDED + 0.3) : 0;
       focus += (target - focus) * Math.min(1, dt * 6);
@@ -632,7 +669,7 @@
       const g = guideBox();
       const showGuide = guideSil.width && presence > 0.01;
       if (video.videoWidth) {
-        if (showGuide) drawFocusedBackground(g, presence);
+        if (showGuide) drawGlass(g, presence);
         else drawVideo(ctx, 0);
       }
       if (showGuide) drawGuide(g);
