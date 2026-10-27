@@ -3,7 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <title>Camera</title>
-  <meta http-equiv="refresh" content="0; url=camera.html">
+  <script>
+    // 브라우저가 예전 camera.html을 10분간 기억해서, 매번 새 주소로 열어 항상 최신 버전을 받음
+    location.replace('camera.html?v=' + Date.now());
+  </script>
+  <noscript><meta http-equiv="refresh" content="0; url=camera.html"></noscript>
 </head>
 <body>
   <a href="camera.html">카메라 열기</a>
