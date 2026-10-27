@@ -171,6 +171,8 @@
     // 찍히는 순간
     const ENTER_LIFT_S = 0.3;    // 틀 안 불똥이가 떠오르는 시간
     const ENTER_SHRINK_S = 0.5;  // 떠오른 뒤 뛰어다니는 크기로 줄어드는 시간
+    const TURN_S = 0.2;          // 방향 바꿀 때 돌아서는 시간
+    const TURN_THRESHOLD = 0.2;  // 좌우 속도가 이보다 커야 돌아섬 (작은 흔들림엔 그대로)
     const LIFT_SCALE = 0.08;     // 떠오를 때 커지는 비율
     const LIFT_RAISE = 0.04;     // 떠오를 때 올라가는 높이 (틀 키 비율)
     const BLINK_MS = 140;        // 셔터처럼 살짝 어두워지는 시간
@@ -631,6 +633,9 @@
         this.held = false;
         this.swing = 0;
         this.fallV = 0;
+        // 바라보는 방향: 1 = 원래 모습(오른쪽으로 갈 때), -1 = 좌우 반전(왼쪽으로 갈 때)
+        this.faceTarget = this.vx < 0 ? -1 : 1;
+        this.face = this.faceTarget;
       }
 
       update(dt) {
@@ -669,6 +674,12 @@
         }
         if (this.y > bottom) { this.y = bottom; this.vy = -Math.abs(this.vy); }
         this.swing = (this.swing || 0) * 0.9;
+
+        // 가는 방향이 확실히 바뀌었을 때만 돌아섬 (위아래로만 갈 땐 그대로 → 덜 깜빡임)
+        if (this.vx > TURN_THRESHOLD) this.faceTarget = 1;
+        else if (this.vx < -TURN_THRESHOLD) this.faceTarget = -1;
+        // 휙 뒤집지 않고 몸을 돌리듯 짧게 (HIG: 갑작스러운 변화 대신 자연스러운 전환, '동작 줄이기'면 바로)
+        this.face = reduceMotion ? this.faceTarget : this.face + (this.faceTarget - this.face) * Math.min(1, dt / TURN_S * 3);
 
         const prev = Math.sin(this.hop);
         this.hop += this.hopRate * dt;
@@ -712,7 +723,9 @@
         ctx.save();
         ctx.translate(this.x, this.y - lift);
         ctx.rotate(Math.max(-0.6, Math.min(0.6, tilt)));
-        ctx.scale(size * squash * grabbed, size / squash * grabbed);
+        // 돌아서는 중간엔 너무 납작해지지 않게 최소 폭을 둠
+        const faceX = Math.sign(this.face || 1) * Math.max(0.12, Math.abs(this.face));
+        ctx.scale(size * squash * grabbed * faceX, size / squash * grabbed);
         if (depth > 0) {   // 떠오른 만큼 아래로 부드러운 그림자
           ctx.shadowColor = `rgba(0, 0, 0, ${0.45 * depth})`;
           ctx.shadowBlur = 30 * depth;
