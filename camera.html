@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Camera</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #111;
+      color: #eee;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 16px;
+    }
+    video {
+      width: min(90vw, 960px);
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 12px;
+      transform: scaleX(-1);
+      object-fit: cover;
+    }
+    #status { font-size: 14px; opacity: 0.7; }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay playsinline muted></video>
+  <p id="status">카메라 연결 중...</p>
+
+  <script>
+    // 휴대폰/가상 카메라로 잡히는 장치 이름 (노트북 카메라만 쓰기 위해 제외)
+    const EXCLUDE = /iphone|android|phone|continuity|link|droidcam|iriun|epoccam|virtual|obs|camo/i;
+
+    const video = document.getElementById('video');
+    const status = document.getElementById('status');
+
+    async function startLaptopCamera() {
+      try {
+        // 장치 이름을 읽으려면 먼저 권한이 필요함
+        const temp = await navigator.mediaDevices.getUserMedia({ video: true });
+        temp.getTracks().forEach(t => t.stop());
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cams = devices.filter(d => d.kind === 'videoinput');
+        const laptop = cams.find(d => !EXCLUDE.test(d.label)) || cams[0];
+
+        if (!laptop) {
+          status.textContent = '카메라를 찾을 수 없습니다.';
+          return;
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: laptop.deviceId }, width: 1920, height: 1080 }
+        });
+        video.srcObject = stream;
+        status.textContent = '사용 중: ' + laptop.label;
+      } catch (err) {
+        status.textContent = '카메라 오류: ' + err.message;
+      }
+    }
+
+    startLaptopCamera();
+  </script>
+</body>
+</html>
