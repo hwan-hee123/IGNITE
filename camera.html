@@ -110,6 +110,7 @@
     body.scanning #caption { opacity: 1; transform: translate(-50%, 0); }
     body.scanning #status { opacity: 0; transform: translateX(-50%) translateY(-6px); }
     @media (prefers-reduced-motion: reduce) { #caption { transition: none; } }
+    .t { display: inline-block; }   /* 글자 바뀔 때 살짝 위아래로 움직이는 전환용 */
 
     /* 접근성: 투명도 줄이기 / 대비 높이기 */
     @media (prefers-reduced-transparency: reduce) {
@@ -137,7 +138,7 @@
       <span class="txt">틀 띄우기</span>
     </button>
     <span class="sep" aria-hidden="true"></span>
-    <button id="btnClear" title="모두 지우기 (C)" aria-label="모두 지우기">
+    <button id="btnClear" title="모두 지우기 (X)" aria-label="모두 지우기">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 7h14M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>
     </button>
   </div>
@@ -184,6 +185,11 @@
     const THROW_GRAVITY = 1400;  // 던진 뒤 떨어지는 힘 (px/초²)
     const SMOKE_PUFFS = 9;       // 불이 꺼질 때 피어오르는 연기 덩어리 수
     const SMOKE_ALPHA = 0.32;    // 연기 진하기
+    const FIZZLE_S = 0.6;        // 불이 꺼지며 사라지는 시간
+    const CLEAR_STAGGER_S = 0.06; // 모두 지울 때 하나씩 꺼지는 간격
+    const OVERFLOW_STAGGER_S = 0.3; // 10마리 넘을 때 오래된 것부터 꺼지는 간격
+    const AUTO_CLOSE_MS = 5000;  // 틀을 띄우고 불똥이가 인식되지 않으면 닫히는 시간
+    const AUTO_CLOSE_FADE_MS = 1000; // 닫히기 전 윤곽선이 옅어지는 시간
     const TURN_THRESHOLD = 0.2;  // 좌우 속도가 이보다 커야 돌아섬 (작은 흔들림엔 그대로)
     const LIFT_SCALE = 0.08;     // 떠오를 때 커지는 비율
     const LIFT_RAISE = 0.04;     // 떠오를 때 올라가는 높이 (틀 키 비율)
@@ -221,7 +227,38 @@
     const video = document.getElementById('video');
     const stage = document.getElementById('stage');
     const ctx = stage.getContext('2d');
-    const status = document.getElementById('status');
+    const statusEl = document.getElementById('status');
+
+    // 글자 바꾸기: 툭 바뀌지 않고, 이전 글자가 살짝 위로 사라지고 새 글자가 아래서 떠오름 ('동작 줄이기'면 바로)
+    function swapText(el, text) {
+      if (el._target === text) return;
+      el._target = text;
+      let span = el.querySelector(':scope > .t');
+      if (!span) {
+        const old = el.textContent;
+        el.textContent = '';
+        span = document.createElement('span');
+        span.className = 't';
+        span.textContent = old;
+        el.appendChild(span);
+      }
+      if (reduceMotion || !span.textContent || !span.animate) { span.textContent = text; return; }
+      if (el._anim) return;   // 바뀌는 중이면 끝날 때 가장 최신 글자로
+      el._anim = span.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-3px)' }],
+        { duration: 120, easing: 'ease-in', fill: 'forwards' });
+      el._anim.finished.then(() => {
+        span.textContent = el._target;
+        el._anim.cancel();
+        el._anim = null;
+        span.animate([{ opacity: 0, transform: 'translateY(3px)' }, { opacity: 1, transform: 'none' }],
+          { duration: 240, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' });
+      });
+    }
+    // 기존 코드의 status.textContent = '...' 를 그대로 쓰면서 바뀔 때마다 자연스럽게 전환
+    const status = {
+      get textContent() { return statusEl._target ?? statusEl.textContent; },
+      set textContent(v) { swapText(statusEl, v); }
+    };
     const caption = document.getElementById('caption');
     const camSelect = document.getElementById('camSelect');
 
@@ -248,6 +285,7 @@
     let armed = true;            // 불똥이를 틀에서 뺐다가 다시 넣어야 다음 인식
     let missCount = 0;
     let blink = 0;               // 찍힘 신호 진행 (1 → 0)
+    let closeFade = 1;           // 틀 자동 닫기 직전 옅어짐 (1 → 0)
     let glow = 0;                // 유리 가장자리 주황빛 (0~1)
     let scan = 0;                // 스캔 중 유리가 짙어진 정도 (0~1, 서서히 변함)
     let readyAt = 0;             // 인식이 안정된 시각 (0 = 아직)
@@ -691,9 +729,11 @@
     }
 
     // Space: 틀 띄우기 / 숨기기 (틀이 떠 있을 때만 인식)
+    let lastSeenAt = 0;   // 틀을 띄운 시각 또는 마지막으로 불똥이가 인식된 시각 (자동 닫기 기준)
     function setGuide(on) {
       guideOn = on;
       readyAt = 0;
+      lastSeenAt = performance.now();
       armed = true;
       stableCount = 0;
       missCount = 0;
@@ -703,7 +743,7 @@
       // 주요 버튼: 틀이 떠 있으면 "닫기"로
       const btn = document.getElementById('btnCapture');
       btn.classList.toggle('on', on);
-      btn.querySelector('.txt').textContent = on ? '틀 닫기' : '틀 띄우기';
+      swapText(btn.querySelector('.txt'), on ? '틀 닫기' : '틀 띄우기');
     }
 
     // ---------- 틀 안의 불똥이 → 스프라이트 이미지 ----------
@@ -747,9 +787,27 @@
         this.face = this.faceTarget;
       }
 
+      // 그 자리에서 불이 꺼지며 사라지기 (delay초 뒤 시작)
+      fizzle(delay = 0) {
+        if (this.fadeT != null) return;
+        this.fadeT = 0;
+        this.fadeDelay = delay;
+      }
+
       update(dt) {
         this.age += dt;
         this.hover += ((this.hovered ? 1 : 0) - this.hover) * (reduceMotion ? 1 : Math.min(1, dt * 12));
+        // 꺼지는 중: 잡고 있던 손은 놓고, 불이 작아지며 색이 빠지다 연기를 남기고 사라짐
+        if (this.fadeT != null && (this.fadeDelay -= dt) <= 0) {
+          if (this.holder) { this.holder.sprite = null; this.holder = null; }
+          this.fadeT = Math.min(1, this.fadeT + dt / FIZZLE_S);
+          if (!this.smoked && this.fadeT > 0.35) {
+            this.smoked = true;
+            smoke(this.x, this.y - this.h * 0.5, this.w, 0, 0, 5);
+          }
+          if (this.fadeT >= 1) this.gone = true;
+          return;
+        }
         // 머리 위 불꽃 끝에서 불티가 피어오름 (등장 연출이 끝난 뒤부터, 들고 있을 때도, 날아갈 땐 꼬리처럼 더 많이)
         if (this.age > this.liftTime() + ENTER_SHRINK_S) {
           this.emberT = (this.emberT ?? Math.random() / EMBER_RATE) - dt;
@@ -825,7 +883,8 @@
         if (this.held || this.thrown) return;
         const s = Math.abs(Math.sin(this.hop));
         const air = this.age < this.liftTime() + ENTER_SHRINK_S ? 0 : s;
-        softEllipse(this.x, this.y, this.w * 0.42 * (1 - air * 0.3), this.h * 0.07 * (1 - air * 0.3), SHADOW_ALPHA * (1 - air * 0.5));
+        const fade = this.fadeT != null && this.fadeDelay <= 0 ? 1 - this.fadeT : 1;   // 꺼질 때 그림자도 같이 옅어짐
+        softEllipse(this.x, this.y, this.w * 0.42 * (1 - air * 0.3), this.h * 0.07 * (1 - air * 0.3), SHADOW_ALPHA * (1 - air * 0.5) * fade);
       }
 
       liftTime() { return reduceMotion ? 0 : ENTER_LIFT_S; }
@@ -851,7 +910,10 @@
 
         // 불똥이는 정면을 보고 있으니 좌우 반전 대신 가는 방향으로 살짝 기울임
         // 잡을 수 있을 때 살짝 들리고(hover), 집으면 더 커짐 — visionOS의 들어 올림 느낌
-        const grabbed = this.held ? 1.1 : 1 + 0.05 * this.hover;
+        // 꺼지는 중: 작아지고(동작 줄이기면 그대로) 투명해지며 색이 빠짐
+        const fading = this.fadeT != null && this.fadeDelay <= 0 ? this.fadeT : 0;
+        const fadeScale = reduceMotion ? 1 : 1 - 0.3 * fading * fading;
+        const grabbed = (this.held ? 1.1 : 1 + 0.05 * this.hover) * fadeScale;
         const tilt = this.held ? -(this.swing || 0) : this.vx * 0.12 + Math.sin(this.hop * 2) * 0.05 - (this.swing || 0);
         ctx.save();
         ctx.translate(this.x, this.y - lift);
@@ -872,6 +934,10 @@
           ctx.shadowColor = `rgba(0, 0, 0, ${0.45 * lifted})`;
           ctx.shadowBlur = 30 * lifted;
           ctx.shadowOffsetY = 14 * lifted;
+        }
+        if (fading > 0) {
+          ctx.globalAlpha = 1 - Math.pow(fading, 1.6);
+          ctx.filter = `grayscale(${fading}) brightness(${1 - 0.35 * fading})`;
         }
         ctx.drawImage(this.img, -this.w / 2, -this.h, this.w, this.h);
         ctx.restore();
@@ -955,13 +1021,19 @@
       const ix = s.x < 0 ? 1 : s.x > innerWidth ? -1 : 0;
       const iy = s.y - s.h / 2 < 0 ? 1 : s.y - s.h / 2 > innerHeight ? -1 : 0;
       spark(ex, ey, 6);   // 꺼지기 직전 마지막 불꽃
-      for (let i = 0; i < SMOKE_PUFFS && particles.length < PARTICLE_MAX; i++) {
+      smoke(ex, ey, s.w, ix, iy, SMOKE_PUFFS);
+    }
+
+    // 연기 피우기: (ix, iy) 쪽으로 살짝 밀려나며 위로 피어오름
+    function smoke(x, y, w, ix, iy, count) {
+      if (reduceMotion) return;
+      for (let i = 0; i < count && particles.length < PARTICLE_MAX; i++) {
         particles.push({
           kind: 'smoke',
-          x: ex + (Math.random() - 0.5) * s.w * 0.3, y: ey + (Math.random() - 0.5) * s.w * 0.3,
+          x: x + (Math.random() - 0.5) * w * 0.3, y: y + (Math.random() - 0.5) * w * 0.3,
           vx: ix * (25 + Math.random() * 35) + (Math.random() - 0.5) * 20,
           vy: iy * (25 + Math.random() * 35) - (30 + Math.random() * 40),   // 위로 피어오름
-          r0: s.w * (0.12 + Math.random() * 0.1), grow: s.w * (0.5 + Math.random() * 0.4),
+          r0: w * (0.12 + Math.random() * 0.1), grow: w * (0.5 + Math.random() * 0.4),
           life: 1, dur: 1.4 + Math.random() * 0.9, delay: i * 0.04
         });
       }
@@ -1056,9 +1128,13 @@
       // 틀 안의 불똥이가 살짝 떠올랐다가 화면으로 튀어나옴 (불꽃은 떠오른 뒤 Sprite가 터뜨림)
       sprites.push(new Sprite(cutout(), g.x + g.w / 2, g.y + g.h, g.h));
       // 너무 많으면 가장 오래된 것부터 정리 (누가 손에 들고 있는 건 빼고)
-      if (sprites.length > MAX_SPRITES) {
-        const i = sprites.findIndex(s => !s.held);
-        if (i >= 0) sprites.splice(i, 1);
+      // 너무 많으면 가장 오래된 것부터 차례로 불이 꺼지며 연기로 사라짐 (누가 손에 든 건 빼고)
+      const alive = sprites.filter(s => s.fadeT == null && !s.thrown);
+      let excess = alive.length - MAX_SPRITES;
+      for (let i = 0, k = 0; excess > 0 && i < alive.length; i++) {
+        if (alive[i].held) continue;
+        alive[i].fizzle(k++ * OVERFLOW_STAGGER_S);
+        excess--;
       }
       blink = 1;
       // 유리는 부드럽게 풀리며 틀이 닫히고 깨끗한 화면으로 (다음 불똥이는 다시 Space)
@@ -1076,6 +1152,7 @@
             missCount = 0;
             inside = true;
             stableCount++;
+            lastSeenAt = performance.now();
           } else if (++missCount >= 3) {
             inside = false;
             stableCount = 0;
@@ -1085,7 +1162,7 @@
 
           if (armed && inside) {
             status.textContent = '그대로 잠시만 기다려주세요';
-            // 인식이 안정된 뒤에도 잠깐(CAPTURE_DELAY_MS) 기다렸다가 찍음 → 그동안 유리가 서서히 짙어짐
+            // 인식이 안정된 뒤에도 잠깐(CAPTURE_DELAY_MS) 기다렸다가 찍음 → 그동안 틀 색이 아래부터 차오름
             if (stableCount >= STABLE_NEEDED) {
               if (!readyAt) readyAt = performance.now();
               if (performance.now() - readyAt >= CAPTURE_DELAY_MS) capture();
@@ -1471,7 +1548,7 @@
       const x = g.x - 6, y = g.y - 6;
       ctx.save();
       if (shrink !== 1) { ctx.translate(cx, cy); ctx.scale(shrink, shrink); ctx.translate(-cx, -cy); }
-      ctx.globalAlpha = presence * 0.9;
+      ctx.globalAlpha = presence * 0.9 * closeFade;
       ctx.drawImage(white, x, y);
       if (progress > 0.002) {
         // 강조색 선을 그린 뒤, 아래쪽(차오른 높이까지)만 남기고 위는 부드럽게 지움
@@ -1487,7 +1564,7 @@
         progc.globalCompositeOperation = 'destination-in';
         progc.fillStyle = grad;
         progc.fillRect(0, 0, prog.width, prog.height);
-        ctx.globalAlpha = presence;
+        ctx.globalAlpha = presence * closeFade;
         if (!highContrast) { ctx.shadowColor = 'rgba(254, 54, 54, 0.45)'; ctx.shadowBlur = 6; }
         ctx.drawImage(prog, x, y);
       }
@@ -1543,9 +1620,15 @@
         } else if (showGuide) {
           drawGlass2D(g, presence);
         }
+        // 틀을 띄우고 불똥이가 AUTO_CLOSE_MS 동안 인식되지 않으면 스스로 닫힘 (마지막 1초는 윤곽선·문구가 서서히 옅어짐)
+        const idle = guideOn && !inside ? performance.now() - lastSeenAt : 0;
+        if (idle > AUTO_CLOSE_MS) setGuide(false);
+        closeFade = guideOn ? Math.min(1, Math.max(0, (AUTO_CLOSE_MS - idle) / AUTO_CLOSE_FADE_MS)) : 1;
+
         // 스캔 중엔 틀 아래 큰 안내 문구 (위쪽 상태 문구와 같은 내용)
         document.body.classList.toggle('scanning', guideOn);
-        if (guideOn && caption.textContent !== status.textContent) caption.textContent = status.textContent;
+        if (guideOn) swapText(caption, status.textContent);
+        caption.style.opacity = guideOn ? String(closeFade) : '';
         const capTop = Math.round(g.y + g.h + 28);
         if (caption.dataset.top !== String(capTop)) { caption.style.top = capTop + 'px'; caption.dataset.top = capTop; }
         if (showGuide) {
@@ -1625,17 +1708,21 @@
     }
 
     document.getElementById('btnCapture').onclick = () => setGuide(!guideOn);
-    function clearSprites() { sprites = []; for (const p of pinches) p.sprite = null; }
+    // 모두 지우기: 한꺼번에 툭 사라지지 않고, 하나씩 아주 짧은 간격으로 불이 꺼지며 연기로 사라짐
+    function clearSprites() {
+      sprites.filter(s => !s.thrown && s.fadeT == null).forEach((s, i) => s.fizzle(i * CLEAR_STAGGER_S));
+    }
     document.getElementById('btnClear').onclick = clearSprites;
     // 마우스로 누른 버튼에 포커스가 남으면 Space가 그 버튼을 또 눌러서 풀어줌
     for (const b of document.querySelectorAll('#ui button')) b.addEventListener('pointerup', () => b.blur());
     addEventListener('keydown', e => {
       if (e.code === 'Space') { e.preventDefault(); setGuide(!guideOn); }
       else if (e.key === 'Enter' && guideOn) capture();   // 틀이 떠 있을 때 바로 인식
-      else if (e.key === 'c' || e.key === 'C') clearSprites();
-      else if (e.key === 'h' || e.key === 'H') toggleUI();
-      else if (e.key === 'f' || e.key === 'F') toggleFull();
-      else if (e.key === 'd' || e.key === 'D') debug = !debug;
+      // 글자 대신 키보드 자리(e.code)로 판단 → 한글 입력 상태여도 동작
+      else if (e.code === 'KeyX') clearSprites();
+      else if (e.code === 'KeyH') toggleUI();
+      else if (e.code === 'KeyF') toggleFull();
+      else if (e.code === 'KeyD') debug = !debug;
     });
     addEventListener('resize', resize);
 
