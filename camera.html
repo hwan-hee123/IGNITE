@@ -10,11 +10,6 @@
     body { color: #eee; font-family: sans-serif; }
     #stage { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
     #video { position: fixed; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
-    #ui select {
-      background: rgba(255, 255, 255, 0.15); color: #fff; border: 0; border-radius: 999px;
-      padding: 6px 10px; font-size: 13px; max-width: 200px;
-    }
-    #ui select option { color: #000; }
     #ui {
       position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
       display: flex; gap: 8px; align-items: center;
@@ -26,6 +21,11 @@
       padding: 6px 12px; font-size: 13px; cursor: pointer;
     }
     #ui button.sub { background: rgba(255, 255, 255, 0.15); }
+    #ui select {
+      background: rgba(255, 255, 255, 0.15); color: #fff; border: 0; border-radius: 999px;
+      padding: 6px 10px; font-size: 13px; max-width: 200px;
+    }
+    #ui select option { color: #000; }
     #status { opacity: 0.8; padding: 0 4px; }
     body.clean #ui { display: none; }
   </style>
@@ -42,34 +42,115 @@
     <button id="btnFull" class="sub">전체화면 (F)</button>
   </div>
 
-  <script>
+  <script type="module">
+    import { FilesetResolver, InteractiveSegmenter }
+      from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+
     // 휴대폰/가상 카메라로 잡히는 장치 이름 (노트북 카메라만 쓰기 위해 제외)
     const EXCLUDE = /iphone|android|phone|continuity|link|droidcam|iriun|epoccam|virtual|obs|camo/i;
 
     const MAX_SPRITES = 10;      // 화면에 동시에 뛰어다니는 불똥이 수
-    const PROC_W = 180;          // 인식용 축소 해상도 (가로)
-    const STABLE_NEEDED = 12;    // 약 1.2초 동안 그림이 가만히 있으면 인식
+    const GUIDE_H = 0.55;        // 화면에 보이는 불똥이 틀의 키 (화면 높이 비율)
+    const WORK_W = 200;          // 인식용 축소 해상도 (가로)
+    const MARGIN = 0.15;         // 틀 바깥으로 얼마나 더 보고 판단할지 (틀 크기 비율)
+    const COVER_OK = 0.8;        // 틀 안이 불똥이로 이만큼 차 있어야 함
+    const SPILL_MAX = 0.4;       // 틀 밖으로 삐져나온 부분은 이만큼까지만 (배경·벽이 통째로 잡히는 것 거르기)
+    const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 캡처 (약 1초)
+
+    const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
+    const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite';
 
     const video = document.getElementById('video');
     const stage = document.getElementById('stage');
     const ctx = stage.getContext('2d');
     const status = document.getElementById('status');
+    const camSelect = document.getElementById('camSelect');
 
-    const proc = document.createElement('canvas');
-    const pctx = proc.getContext('2d', { willReadFrequently: true });
+    const work = document.createElement('canvas');
+    const wctx = work.getContext('2d', { willReadFrequently: true });
 
+    let segmenter = null;
     let sprites = [];
     let particles = [];
-    let showGuide = true;
-    let stableCount = 0;
-    let armed = true;            // 종이를 치웠다가 다시 보여줘야 다음 인식
-    let lastSeg = null;
-    let flash = 0;
+    let showUI = true;
     let debug = false;
+    let lastInfo = null;         // 디버그용 { mask, cover, spill }
+    let inside = false;          // 지금 틀 안에 불똥이가 들어와 있는지
+    let stableCount = 0;
+    let armed = true;            // 불똥이를 틀에서 뺐다가 다시 넣어야 다음 인식
+    let missCount = 0;
+    let flash = 0;
+    let focus = 0;               // 주변 블러 정도 (0~1)
+
+    // ---------- 불똥이 실루엣 (틀) ----------
+
+    const silhouette = new Image();
+    silhouette.src = 'silhouette.png';
+    const ASPECT = 0.761;        // 실루엣 가로/세로 비율
+
+    // 화면에 그리는 틀 위치
+    function guideBox() {
+      const h = innerHeight * GUIDE_H, w = h * ASPECT;
+      return { x: (innerWidth - w) / 2, y: innerHeight * 0.46 - h / 2, w, h };
+    }
+
+    // 틀(+여유)이 영상 원본(좌우반전 전)의 어느 부분인지
+    function guideInVideo(margin) {
+      const g = guideBox(), L = videoLayout();
+      const mx = g.w * margin, my = g.h * margin;
+      const xUnmirrored = innerWidth - (g.x - mx) - (g.w + mx * 2);
+      return {
+        x: (xUnmirrored - L.ox) / L.s,
+        y: (g.y - my - L.oy) / L.s,
+        w: (g.w + mx * 2) / L.s,
+        h: (g.h + my * 2) / L.s
+      };
+    }
+
+    // 실루엣 모양 그대로 반투명하게 + 테두리 (색이 바뀌며 진행 상황 표시)
+    const guideCache = { key: '', fill: null, ring: null, hot: null };
+    function guideImages(w, h) {
+      const key = Math.round(w) + 'x' + Math.round(h);
+      if (guideCache.key === key) return guideCache;
+      const make = () => { const c = document.createElement('canvas'); c.width = Math.round(w) + 12; c.height = Math.round(h) + 12; return c; };
+      const fill = make(), ring = make();
+      const f = fill.getContext('2d');
+      f.drawImage(silhouette, 6, 6, w, h);
+      const r = ring.getContext('2d');
+      for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) r.drawImage(silhouette, 6 + Math.cos(a) * 4, 6 + Math.sin(a) * 4, w, h);
+      r.globalCompositeOperation = 'destination-out';
+      r.drawImage(silhouette, 6, 6, w, h);
+      const hot = make(), hc = hot.getContext('2d');
+      hc.drawImage(ring, 0, 0);
+      hc.globalCompositeOperation = 'source-in';
+      hc.fillStyle = '#ff7a1a';
+      hc.fillRect(0, 0, hot.width, hot.height);
+      Object.assign(guideCache, { key, fill, ring, hot });
+      return guideCache;
+    }
+
+    // 인식용: work 크기에 맞춘 실루엣 (영상 원본 기준이라 좌우반전)
+    const tplCache = { key: '', g: null, area: 0 };
+    function tplGrid(w, h) {
+      const key = w + 'x' + h;
+      if (tplCache.key === key) return tplCache;
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const cc = c.getContext('2d', { willReadFrequently: true });
+      const mx = w * MARGIN / (1 + MARGIN * 2), my = h * MARGIN / (1 + MARGIN * 2);
+      cc.translate(w, 0);
+      cc.scale(-1, 1);
+      cc.drawImage(silhouette, mx, my, w - mx * 2, h - my * 2);
+      const d = cc.getImageData(0, 0, w, h).data;
+      const g = new Uint8Array(w * h);
+      let area = 0;
+      for (let i = 0; i < g.length; i++) if (d[i * 4 + 3] > 127) { g[i] = 1; area++; }
+      Object.assign(tplCache, { key, g, area });
+      return tplCache;
+    }
 
     // ---------- 카메라 ----------
 
-    const camSelect = document.getElementById('camSelect');
     const CAMERA_ERRORS = {
       NotAllowedError: '카메라 권한이 거부됐어요. 주소창 왼쪽 자물쇠 → 카메라 → 허용 후 새로고침해주세요',
       NotFoundError: '카메라를 찾을 수 없어요',
@@ -115,7 +196,7 @@
           catch (e) { track = await openCamera(); }   // 실패하면 기본 카메라 유지
         }
         camSelect.value = track.getSettings().deviceId;
-        status.textContent = '가운데 네모에 색칠한 불똥이를 보여주세요';
+        if (segmenter) status.textContent = '불똥이를 틀 안에 맞춰 넣어주세요';
       } catch (err) {
         status.textContent = CAMERA_ERRORS[err.name] || ('카메라 오류: ' + err.name + ' ' + err.message);
       }
@@ -130,188 +211,96 @@
       }
     };
 
-    // ---------- 화면 좌표 ↔ 영상 좌표 ----------
+    // ---------- AI 모델 ----------
 
-    function resize() {
-      const dpr = window.devicePixelRatio || 1;
-      stage.width = innerWidth * dpr;
-      stage.height = innerHeight * dpr;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    async function loadModels() {
+      const vision = await FilesetResolver.forVisionTasks(WASM);
+      const make = (delegate) => InteractiveSegmenter.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+        outputCategoryMask: true, outputConfidenceMasks: false
+      });
+      try { segmenter = await make('GPU'); } catch (e) { segmenter = await make('CPU'); }
     }
 
-    // 영상을 화면 가득 채우는(cover) 배치
-    function videoLayout() {
-      const cw = innerWidth, ch = innerHeight;
-      const vw = video.videoWidth, vh = video.videoHeight;
-      const s = Math.max(cw / vw, ch / vh);
-      return { s, ox: (cw - vw * s) / 2, oy: (ch - vh * s) / 2 };
-    }
+    // ---------- 틀 안에 불똥이가 있는지 ----------
 
-    // 화면 가운데 가이드 네모 (세로형 종이 비율)
-    function guideBox() {
-      const h = innerHeight * 0.62;
-      const w = h * 0.75;
-      return { x: (innerWidth - w) / 2, y: (innerHeight - h) / 2 - innerHeight * 0.03, w, h };
-    }
-
-    // 가이드 네모가 영상(좌우반전 전 원본)의 어느 부분인지
-    function guideInVideo() {
-      const g = guideBox(), L = videoLayout();
-      const xUnmirrored = innerWidth - g.x - g.w;
-      return {
-        x: (xUnmirrored - L.ox) / L.s,
-        y: (g.y - L.oy) / L.s,
-        w: g.w / L.s,
-        h: g.h / L.s
-      };
-    }
-
-    // ---------- 그림 분리 (흰 종이 배경 제거) ----------
-
-    function segment(data, w, h) {
-      const n = w * h;
-      const lum = new Float32Array(n);
-      const white = new Uint8Array(n);
-      const hist = new Uint32Array(256);
-
-      for (let i = 0; i < n; i++) {
-        const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
-        const l = 0.299 * r + 0.587 * g + 0.114 * b;
-        lum[i] = l;
-        hist[l | 0]++;
+    // 점 하나를 찍으면 그 점에 있는 물체만 잘라낸 마스크 (1 = 물체, 찍은 점과 이어진 덩어리만)
+    function segmentAt(w, h, px, py) {
+      let out = null;
+      const start = Math.min(h - 1, Math.round(py * h)) * w + Math.min(w - 1, Math.round(px * w));
+      segmenter.segment(work, { keypoint: { x: px, y: py } }, (res) => {
+        const arr = res.categoryMask.getAsUint8Array();
+        const fg = arr[start];
+        out = new Uint8Array(w * h);
+        for (let i = 0; i < out.length; i++) out[i] = arr[i] === fg ? 1 : 0;
+      });
+      if (!out) return null;
+      const comp = new Uint8Array(w * h);
+      const q = new Int32Array(w * h);
+      let head = 0, tail = 0;
+      q[tail++] = start; comp[start] = 1;
+      while (head < tail) {
+        const i = q[head++], x = i % w;
+        if (x > 0 && out[i - 1] && !comp[i - 1]) { comp[i - 1] = 1; q[tail++] = i - 1; }
+        if (x < w - 1 && out[i + 1] && !comp[i + 1]) { comp[i + 1] = 1; q[tail++] = i + 1; }
+        if (i >= w && out[i - w] && !comp[i - w]) { comp[i - w] = 1; q[tail++] = i - w; }
+        if (i < w * h - w && out[i + w] && !comp[i + w]) { comp[i + w] = 1; q[tail++] = i + w; }
       }
-      // 종이 밝기 = 밝은 쪽 상위 10% 지점 (조명에 따라 자동 보정)
-      let acc = 0, paper = 255;
-      for (let v = 255; v >= 0; v--) {
-        acc += hist[v];
-        if (acc >= n * 0.1) { paper = v; break; }
-      }
-      paper = Math.max(paper, 60);
+      return comp;
+    }
 
-      // 종이 색 = 가장 밝은 픽셀들의 평균 (형광등/전구색 조명 색 보정용)
-      let pr = 0, pg = 0, pb = 0, pc = 0;
-      for (let i = 0; i < n; i++) {
-        if (lum[i] >= paper) { pr += data[i * 4]; pg += data[i * 4 + 1]; pb += data[i * 4 + 2]; pc++; }
-      }
-      pr = Math.max(1, pr / pc); pg = Math.max(1, pg / pc); pb = Math.max(1, pb / pc);
+    // 틀(+여유) 부분만 잘라서 틀 가운데를 찍어보고, 잘린 물체가 틀을 얼마나 채우는지 계산
+    function checkGuide() {
+      const r = guideInVideo(MARGIN);
+      const w = WORK_W, h = Math.round(WORK_W * r.h / r.w);
+      if (work.width !== w || work.height !== h) { work.width = w; work.height = h; }
+      wctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, w, h);
+      const t = tplGrid(w, h);
 
-      let whiteCount = 0;
-      for (let i = 0; i < n; i++) {
-        // 종이가 하얗게 보이도록 색을 맞춘 뒤 판단
-        const r = data[i * 4] * 255 / pr, g = data[i * 4 + 1] * 255 / pg, b = data[i * 4 + 2] * 255 / pb;
-        const sat = Math.max(r, g, b) - Math.min(r, g, b);
-        if (lum[i] > paper * 0.72 && sat < 60) {
-          white[i] = 1;
-          whiteCount++;
+      let best = null;
+      for (const [px, py] of [[0.5, 0.55], [0.5, 0.4]]) {   // 몸통 가운데, 조금 위
+        const mask = segmentAt(w, h, px, py);
+        if (!mask) continue;
+        let inter = 0, outside = 0;
+        for (let i = 0; i < mask.length; i++) {
+          if (!mask[i]) continue;
+          if (t.g[i]) inter++; else outside++;
+        }
+        const cover = inter / t.area, spill = outside / t.area;
+        const ok = cover >= COVER_OK && spill <= SPILL_MAX;
+        if (!best || (ok && !best.ok) || (ok === best.ok && cover - spill > best.cover - best.spill)) {
+          best = { mask, cover, spill, ok };
         }
       }
-
-      // 테두리에서 시작해 닿는 곳 = 배경 (종이 바깥 + 종이를 잡은 손 + 흰 종이)
-      // 바깥 → 흰 종이로는 들어가지만, 흰 종이 → 색칠한 그림으로는 넘어가지 않음
-      const bg = new Uint8Array(n);
-      const queue = new Int32Array(n);
-      {
-        let head = 0, tail = 0;
-        const push = (i, from) => {
-          if (!bg[i] && (from < 0 || !white[from] || white[i])) { bg[i] = 1; queue[tail++] = i; }
-        };
-        for (let x = 0; x < w; x++) { push(x, -1); push((h - 1) * w + x, -1); }
-        for (let y = 0; y < h; y++) { push(y * w, -1); push(y * w + w - 1, -1); }
-        while (head < tail) {
-          const i = queue[head++], x = i % w;
-          if (x > 0) push(i - 1, i);
-          if (x < w - 1) push(i + 1, i);
-          if (i >= w) push(i - w, i);
-          if (i < n - w) push(i + w, i);
-        }
-      }
-
-      // 남은 덩어리 중 너무 작은 점(잡티)은 제거
-      const mask = new Uint8Array(n);
-      const minArea = n * 0.004;
-      let area = 0, x0 = w, y0 = h, x1 = -1, y1 = -1;
-      const seen = new Uint8Array(n);
-      for (let s = 0; s < n; s++) {
-        if (bg[s] || seen[s]) continue;
-        let head = 0, tail = 0;
-        queue[tail++] = s; seen[s] = 1;
-        while (head < tail) {
-          const i = queue[head++], x = i % w;
-          const nb = [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i >= w ? i - w : -1, i < n - w ? i + w : -1];
-          for (const j of nb) {
-            if (j >= 0 && !bg[j] && !seen[j]) { seen[j] = 1; queue[tail++] = j; }
-          }
-        }
-        if (tail < minArea) continue;
-        for (let k = 0; k < tail; k++) {
-          const i = queue[k], x = i % w, y = (i / w) | 0;
-          mask[i] = 1;
-          if (x < x0) x0 = x; if (x > x1) x1 = x;
-          if (y < y0) y0 = y; if (y > y1) y1 = y;
-        }
-        area += tail;
-      }
-
-      return {
-        mask, w, h,
-        paperFrac: whiteCount / n,
-        areaFrac: area / n,
-        bbox: x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }
-      };
+      lastInfo = best;
+      return !!(best && best.ok);
     }
 
-    function looksLikeDrawing(seg) {
-      return seg.bbox && seg.paperFrac > 0.3 && seg.areaFrac > 0.03 && seg.areaFrac < 0.6;
-    }
+    // ---------- 틀 안의 불똥이 → 스프라이트 이미지 ----------
 
-    function analyzeFrame() {
-      if (!video.videoWidth) return null;
-      const r = guideInVideo();
-      const pw = PROC_W, ph = Math.round(PROC_W * r.h / r.w);
-      proc.width = pw; proc.height = ph;
-      pctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, pw, ph);
-      return segment(pctx.getImageData(0, 0, pw, ph).data, pw, ph);
-    }
-
-    // ---------- 인식된 그림 → 스프라이트 이미지 ----------
-
-    function makeSpriteImage(seg) {
-      const r = guideInVideo();
-      const scale = Math.min(1, 700 / r.h);
-      const fw = Math.round(r.w * scale), fh = Math.round(r.h * scale);
-
-      const full = document.createElement('canvas');
-      full.width = fw; full.height = fh;
-      const fctx = full.getContext('2d');
-      fctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, fw, fh);
-
-      // 저해상도 마스크를 부드럽게 키워서 알파로 사용
-      const m = document.createElement('canvas');
-      m.width = seg.w; m.height = seg.h;
-      const mctx = m.getContext('2d');
-      const md = mctx.createImageData(seg.w, seg.h);
-      for (let i = 0; i < seg.mask.length; i++) md.data[i * 4 + 3] = seg.mask[i] ? 255 : 0;
-      mctx.putImageData(md, 0, 0);
-      fctx.globalCompositeOperation = 'destination-in';
-      fctx.imageSmoothingEnabled = true;
-      fctx.drawImage(m, 0, 0, fw, fh);
-
-      const k = fw / seg.w, pad = 2 * k;
-      const bx = Math.max(0, seg.bbox.x * k - pad), by = Math.max(0, seg.bbox.y * k - pad);
-      const bw = Math.min(fw - bx, seg.bbox.w * k + pad * 2), bh = Math.min(fh - by, seg.bbox.h * k + pad * 2);
+    function cutout() {
+      const r = guideInVideo(0);
+      const scale = Math.min(1, 500 / r.h);
       const out = document.createElement('canvas');
-      out.width = Math.round(bw); out.height = Math.round(bh);
-      out.getContext('2d').drawImage(full, bx, by, bw, bh, 0, 0, out.width, out.height);
+      out.width = Math.round(r.w * scale); out.height = Math.round(r.h * scale);
+      const o = out.getContext('2d');
+      o.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, out.width, out.height);
+      // 영상 원본은 좌우반전 전이라 틀도 반전해서 오림
+      o.globalCompositeOperation = 'destination-in';
+      o.translate(out.width, 0);
+      o.scale(-1, 1);
+      o.drawImage(silhouette, 0, 0, out.width, out.height);
       return out;
     }
 
     // ---------- 뛰어다니는 불똥이 ----------
 
     class Sprite {
-      constructor(img, x, y) {
+      constructor(img, x, y, h0) {
         this.img = img;
         this.h = innerHeight * (0.2 + Math.random() * 0.06);
         this.w = this.h * img.width / img.height;
+        this.h0 = h0 || this.h;
         this.x = x; this.y = y;
         const a = Math.random() * Math.PI * 2;
         this.speed = innerHeight * (0.18 + Math.random() * 0.12);
@@ -351,8 +340,9 @@
         const s = Math.abs(Math.sin(this.hop));
         const lift = s * this.h * 0.18;
         const squash = 1 + (1 - s) * 0.08;
-        const pop = Math.min(1, this.age / 0.35);
-        const appear = pop < 1 ? 1 + Math.sin(pop * Math.PI) * 0.25 : 1;
+        // 등장: 틀 크기에서 뛰어다니는 크기로 줄어듦
+        const t = Math.min(1, this.age / 0.6);
+        const size = (this.h0 + (this.h - this.h0) * (1 - Math.pow(1 - t, 3))) / this.h;
 
         // 그림자
         ctx.save();
@@ -362,10 +352,11 @@
         ctx.fill();
         ctx.restore();
 
+        // 불똥이는 정면을 보고 있으니 좌우 반전 대신 가는 방향으로 살짝 기울임
         ctx.save();
         ctx.translate(this.x, this.y - lift);
-        ctx.scale((this.vx < 0 ? -1 : 1) * pop * appear * squash, pop * appear / squash);
-        ctx.rotate(Math.sin(this.hop * 2) * 0.06);
+        ctx.rotate(this.vx * 0.12 + Math.sin(this.hop * 2) * 0.05);
+        ctx.scale(size * squash, size / squash);
         ctx.drawImage(this.img, -this.w / 2, -this.h, this.w, this.h);
         ctx.restore();
       }
@@ -379,62 +370,109 @@
       }
     }
 
-    function addSprite(img) {
-      const g = guideBox();
-      sprites.push(new Sprite(img, g.x + g.w / 2, g.y + g.h * 0.85));
-      if (sprites.length > MAX_SPRITES) sprites.shift();
-      spark(g.x + g.w / 2, g.y + g.h / 2, 30);
-      flash = 1;
+    // ---------- 화면 ----------
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      stage.width = innerWidth * dpr;
+      stage.height = innerHeight * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
-    function capture(seg) {
-      seg = seg || analyzeFrame();
-      if (!seg || !seg.bbox) {
-        status.textContent = '그림을 찾지 못했어요. 흰 종이를 네모 안에 꽉 차게 보여주세요';
-        return;
-      }
-      addSprite(makeSpriteImage(seg));
+    // 영상을 화면 가득 채우는(cover) 배치
+    function videoLayout() {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      const s = Math.max(innerWidth / vw, innerHeight / vh);
+      return { s, ox: (innerWidth - vw * s) / 2, oy: (innerHeight - vh * s) / 2 };
+    }
+
+    // ---------- 인식 → 캡처 ----------
+
+    function capture() {
+      if (!video.videoWidth) return;
+      const g = guideBox();
+      sprites.push(new Sprite(cutout(), g.x + g.w / 2, g.y + g.h, g.h));
+      if (sprites.length > MAX_SPRITES) sprites.shift();
+      spark(g.x + g.w / 2, g.y + g.h / 2, 40);
+      flash = 1;
       armed = false;
       stableCount = 0;
-      status.textContent = '인식 완료! 종이를 치우고 다음 그림을 보여주세요';
+      status.textContent = '나왔다! 불똥이를 빼고 다음 불똥이를 넣어주세요';
     }
 
-    // ---------- 자동 인식 ----------
+    async function detectLoop() {
+      while (true) {
+        if (segmenter && video.videoWidth) {
+          let ok = false;
+          try { ok = checkGuide(); } catch (e) { console.error(e); }
 
-    setInterval(() => {
-      const seg = analyzeFrame();
-      if (!seg) return;
-      const ok = looksLikeDrawing(seg);
+          if (ok) {
+            missCount = 0;
+            inside = true;
+            stableCount++;
+          } else if (++missCount >= 3) {
+            inside = false;
+            stableCount = 0;
+            if (!armed) { armed = true; status.textContent = '불똥이를 틀 안에 맞춰 넣어주세요'; }
+          }
 
-      if (!armed) {
-        // 종이를 치우면 다시 인식 준비
-        if (!ok) { armed = true; status.textContent = '가운데 네모에 색칠한 불똥이를 보여주세요'; }
-        lastSeg = seg;
-        return;
+          if (armed && inside) {
+            status.textContent = '좋아요! 그대로 잠깐만...';
+            if (stableCount >= STABLE_NEEDED) capture();
+          }
+        }
+        await new Promise(r => setTimeout(r, 80));
       }
-
-      if (ok && lastSeg && lastSeg.bbox) {
-        const da = Math.abs(seg.areaFrac - lastSeg.areaFrac) / seg.areaFrac;
-        const cx = seg.bbox.x + seg.bbox.w / 2 - (lastSeg.bbox.x + lastSeg.bbox.w / 2);
-        const cy = seg.bbox.y + seg.bbox.h / 2 - (lastSeg.bbox.y + lastSeg.bbox.h / 2);
-        const still = da < 0.15 && Math.hypot(cx, cy) < seg.w * 0.05;
-        stableCount = still ? stableCount + 1 : Math.max(0, stableCount - 2);
-      } else {
-        stableCount = 0;
-      }
-      lastSeg = seg;
-
-      if (ok && stableCount > 0) status.textContent = '그대로 잠깐만 들고 있어주세요...';
-      else if (!ok && seg.paperFrac > 0.15) {
-        // 종이는 보이는데 인식이 안 될 때 이유 알려주기
-        if (seg.paperFrac <= 0.3) status.textContent = '흰 종이를 네모 안에 꽉 차게 가까이 보여주세요';
-        else if (seg.areaFrac <= 0.03) status.textContent = '그림이 잘 안 보여요. 테두리를 진하게, 색을 꽉 채워주세요';
-        else if (seg.areaFrac >= 0.6) status.textContent = '조금 더 멀리, 종이 전체가 보이게 해주세요';
-      }
-      if (stableCount >= STABLE_NEEDED) capture(seg);
-    }, 100);
+    }
 
     // ---------- 그리기 ----------
+
+    function drawVideo(blur) {
+      const L = videoLayout();
+      ctx.save();
+      ctx.translate(innerWidth, 0);
+      ctx.scale(-1, 1);   // 거울처럼 좌우반전
+      if (blur > 0) ctx.filter = `blur(${blur}px)`;
+      ctx.drawImage(video, L.ox, L.oy, video.videoWidth * L.s, video.videoHeight * L.s);
+      ctx.restore();
+    }
+
+    // 틀 안만 또렷하게 (주변이 흐려질 때)
+    const fx = document.createElement('canvas');
+    const fxc = fx.getContext('2d');
+    function drawSharpInside(g) {
+      const L = videoLayout();
+      fx.width = Math.round(g.w); fx.height = Math.round(g.h);
+      fxc.save();
+      fxc.translate(fx.width, 0);
+      fxc.scale(-1, 1);
+      const r = guideInVideo(0);
+      fxc.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, fx.width, fx.height);
+      fxc.restore();
+      fxc.globalCompositeOperation = 'destination-in';
+      fxc.drawImage(silhouette, 0, 0, fx.width, fx.height);
+      fxc.globalCompositeOperation = 'source-over';
+      ctx.drawImage(fx, g.x, g.y, g.w, g.h);
+    }
+
+    function drawGuide(g) {
+      const img = guideImages(g.w, g.h);
+      const progress = armed && inside ? Math.min(1, stableCount / STABLE_NEEDED) : 0;
+      ctx.save();
+      // 틀 안을 살짝 밝게 (불똥이가 들어오면 사라짐)
+      ctx.globalAlpha = 0.12 * (1 - focus);
+      ctx.drawImage(img.fill, g.x - 6, g.y - 6);
+      // 테두리: 흰색 → 불똥이가 들어오면 주황으로 빛남
+      ctx.globalAlpha = (armed ? 0.85 : 0.35) * (1 - progress);
+      ctx.drawImage(img.ring, g.x - 6, g.y - 6);
+      if (progress > 0) {
+        ctx.globalAlpha = progress;
+        ctx.shadowColor = '#ff7a1a';
+        ctx.shadowBlur = 10 + progress * 25;
+        ctx.drawImage(img.hot, g.x - 6, g.y - 6);
+      }
+      ctx.restore();
+    }
 
     let last = performance.now();
     function frame(now) {
@@ -444,16 +482,16 @@
       ctx.fillStyle = '#111';
       ctx.fillRect(0, 0, innerWidth, innerHeight);
 
-      if (video.videoWidth) {
-        const L = videoLayout();
-        ctx.save();
-        ctx.translate(innerWidth, 0);
-        ctx.scale(-1, 1);   // 거울처럼 좌우반전
-        ctx.drawImage(video, L.ox, L.oy, video.videoWidth * L.s, video.videoHeight * L.s);
-        ctx.restore();
-      }
+      // 불똥이가 틀에 들어오면 주변이 서서히 흐려짐
+      const target = armed && inside ? Math.min(1, stableCount / STABLE_NEEDED + 0.3) : 0;
+      focus += (target - focus) * Math.min(1, dt * 6);
 
-      if (showGuide) drawGuide();
+      const g = guideBox();
+      if (video.videoWidth) {
+        drawVideo(focus * 14);
+        if (focus > 0.05) drawSharpInside(g);
+      }
+      if (silhouette.complete && showUI) drawGuide(g);
       if (debug) drawDebug();
 
       sprites.sort((a, b) => a.y - b.y);
@@ -479,56 +517,42 @@
       requestAnimationFrame(frame);
     }
 
-    function drawGuide() {
-      const g = guideBox();
-      ctx.save();
-      ctx.lineWidth = 3;
-      ctx.setLineDash([14, 10]);
-      ctx.strokeStyle = armed ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.3)';
-      ctx.strokeRect(g.x, g.y, g.w, g.h);
-      ctx.setLineDash([]);
-
-      if (armed && stableCount > 0) {
-        // 인식 진행도
-        ctx.lineWidth = 8;
-        ctx.strokeStyle = '#ff7a1a';
-        ctx.beginPath();
-        ctx.arc(g.x + g.w / 2, g.y + g.h / 2, 40, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * stableCount / STABLE_NEEDED);
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
-
-    // 인식 화면 보기 (D): 왼쪽 위에 카메라가 본 네모 안과 인식된 그림(주황)을 표시
+    // 인식 화면 보기 (D): 틀 부분 영상, AI가 잘라낸 물체(주황), 틀(초록), 점수
     const dbg = document.createElement('canvas');
     function drawDebug() {
-      const seg = lastSeg;
-      if (!seg) return;
-      dbg.width = seg.w; dbg.height = seg.h;
+      if (!work.width) return;
+      const info = lastInfo, t = tplGrid(work.width, work.height);
+      dbg.width = work.width; dbg.height = work.height;
       const dctx = dbg.getContext('2d');
-      dctx.drawImage(proc, 0, 0);
-      const id = dctx.getImageData(0, 0, seg.w, seg.h);
-      for (let i = 0; i < seg.mask.length; i++) {
-        if (seg.mask[i]) { id.data[i * 4] = 255; id.data[i * 4 + 1] = 120; id.data[i * 4 + 2] = 0; }
-        else { id.data[i * 4] *= 0.4; id.data[i * 4 + 1] *= 0.4; id.data[i * 4 + 2] *= 0.4; }
+      dctx.drawImage(work, 0, 0);
+      const id = dctx.getImageData(0, 0, dbg.width, dbg.height);
+      for (let i = 0; i < t.g.length; i++) {
+        if (info && info.mask[i]) { id.data[i * 4] = 255; id.data[i * 4 + 1] = 120; id.data[i * 4 + 2] = 0; }
+        else if (t.g[i]) { id.data[i * 4 + 1] = Math.min(255, id.data[i * 4 + 1] + 80); }
       }
       dctx.putImageData(id, 0, 0);
-      const dh = 220, dw = dh * seg.w / seg.h;
-      ctx.drawImage(dbg, 12, 12, dw, dh);
+      const dh = 220, dw = dh * dbg.width / dbg.height;
+      ctx.save();
+      ctx.translate(12 + dw, 12);
+      ctx.scale(-1, 1);   // 화면과 같은 방향으로
+      ctx.drawImage(dbg, 0, 0, dw, dh);
+      ctx.restore();
       ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-      ctx.fillRect(12, 12 + dh, dw, 54);
+      ctx.fillRect(12, 12 + dh, Math.max(dw, 190), 54);
       ctx.fillStyle = '#fff';
       ctx.font = '12px sans-serif';
-      ctx.fillText(`종이 ${(seg.paperFrac * 100) | 0}% (30%↑)`, 18, 12 + dh + 16);
-      ctx.fillText(`그림 ${(seg.areaFrac * 100).toFixed(1)}% (3~60%)`, 18, 12 + dh + 32);
-      ctx.fillText(`안정 ${stableCount}/${STABLE_NEEDED} ${armed ? '' : '(종이 치우기 대기)'}`, 18, 12 + dh + 48);
+      if (info) {
+        ctx.fillText(`틀 채움 ${(info.cover * 100) | 0}% (${COVER_OK * 100}%↑)`, 18, 12 + dh + 16);
+        ctx.fillText(`틀 밖 ${(info.spill * 100) | 0}% (${SPILL_MAX * 100}%↓)`, 18, 12 + dh + 32);
+      }
+      ctx.fillText(`안정 ${stableCount}/${STABLE_NEEDED} ${armed ? '' : '(빼기 대기)'}`, 18, 12 + dh + 48);
     }
 
     // ---------- 조작 ----------
 
-    function toggleClean() {
-      showGuide = !showGuide;
-      document.body.classList.toggle('clean', !showGuide);
+    function toggleUI() {
+      showUI = !showUI;
+      document.body.classList.toggle('clean', !showUI);
     }
     function toggleFull() {
       if (document.fullscreenElement) document.exitFullscreen();
@@ -537,12 +561,12 @@
 
     document.getElementById('btnCapture').onclick = () => capture();
     document.getElementById('btnClear').onclick = () => { sprites = []; };
-    document.getElementById('btnClean').onclick = toggleClean;
+    document.getElementById('btnClean').onclick = toggleUI;
     document.getElementById('btnFull').onclick = toggleFull;
     addEventListener('keydown', e => {
       if (e.code === 'Space') { e.preventDefault(); capture(); }
       else if (e.key === 'c' || e.key === 'C') sprites = [];
-      else if (e.key === 'h' || e.key === 'H') toggleClean();
+      else if (e.key === 'h' || e.key === 'H') toggleUI();
       else if (e.key === 'f' || e.key === 'F') toggleFull();
       else if (e.key === 'd' || e.key === 'D') debug = !debug;
     });
@@ -551,6 +575,12 @@
     resize();
     requestAnimationFrame(frame);
     startLaptopCamera();
+    loadModels()
+      .then(() => {
+        if (video.videoWidth) status.textContent = '불똥이를 틀 안에 맞춰 넣어주세요';
+        detectLoop();
+      })
+      .catch(err => { status.textContent = 'AI 모델을 불러오지 못했어요: ' + err.message; });
   </script>
 </body>
 </html>
