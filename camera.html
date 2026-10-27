@@ -468,6 +468,12 @@
     }
 
     function updateHands(now, dt) {
+      // 불똥이 스캔 중(틀이 떠 있을 때)엔 손 제스처를 끔: 불똥이를 든 손이 커서로 잡히지 않게
+      // (HIG: 한 화면에서 서로 부딪히는 동작을 섞지 않기) — 잡고 있던 불똥이는 놓고, 커서는 부드럽게 사라짐
+      if (guideOn) {
+        for (const p of pinches) { if (p.down) pinchEnd(p); p.visible = false; }
+        return;
+      }
       if (!hands || !video.videoWidth || video.currentTime === lastHandTime) return;
       lastHandTime = video.currentTime;
       let res;
