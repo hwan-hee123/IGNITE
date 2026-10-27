@@ -164,9 +164,11 @@
     const SPILL_MAX = 0.4;       // 틀 밖으로 삐져나온 부분은 이만큼까지만 (배경·벽이 통째로 잡히는 것 거르기)
     const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 "인식됨"
     const CAPTURE_DELAY_MS = 500; // 인식된 뒤 실제로 찍기까지 기다리는 시간
-    const SCAN_FROST = 2.2;      // 스캔 중 유리가 더 흐려지는 정도
-    const SCAN_DIM = 0.06;       // 스캔 중 유리가 더 어두워지는 정도 (아주 살짝)
-    const SCAN_REFRACT = 0.6;    // 스캔 중 가장자리 굴절이 커지는 비율
+    // 스캔 진행은 유리가 아니라 틀 색이 아래→위로 차오르는 걸로 보여줌 (유리는 그대로)
+    const SCAN_FROST = 0;        // 스캔 중 유리가 더 흐려지는 정도
+    const SCAN_DIM = 0;          // 스캔 중 유리가 더 어두워지는 정도
+    const SCAN_REFRACT = 0;      // 스캔 중 가장자리 굴절이 커지는 비율
+    const FILL_FEATHER = 14;     // 차오르는 색 경계의 부드러운 폭 (px)
     // 찍히는 순간
     const ENTER_LIFT_S = 0.3;    // 틀 안 불똥이가 떠오르는 시간
     const ENTER_SHRINK_S = 0.5;  // 떠오른 뒤 뛰어다니는 크기로 줄어드는 시간
@@ -190,8 +192,9 @@
     const GLASS_BEVEL = 0.04;    // 구멍 가장자리 둥근 경사면 폭 (틀 키 비율)
     const GLASS_REFRACT_PX = 0;  // 경사면에서 뒤 화면이 휘는 정도 (0 = 안 휨, 밝은 배경이 틀 밖으로 번지지 않게)
     const GLASS_RIM = 0;         // 틀 가장자리 유리 반사광 (0 = 없음, 흰 윤곽선만)
-    const GLASS_FROST = 4.2;     // 판의 흐림 정도
-    const GLASS_FROST_SOLID = 5.5; // '투명도 줄이기' 설정일 때 흐림 정도
+    const GLASS_BLUR_PX = 34;    // 흐림 반경 (px, 클수록 더 뿌옇게)
+    const GLASS_FROST = 2.0;     // 흐림 전 미리 살짝 뭉개는 정도 (흐림을 매끈하게)
+    const GLASS_FROST_SOLID = 3.0; // '투명도 줄이기' 설정일 때
     const GLASS_SAT = 1.15;      // 채도 (색이 튀지 않게 거의 그대로)
     const GLASS_TINT_DARK = 0.0; // 어두운 틴트 세기 (0 = 원래 밝기 그대로, 키우면 틀 밖이 어두워짐)
     const GLASS_SHADOW = 0;      // 구멍 안 그림자 (0 = 없음, 틀 안을 깨끗하게)
@@ -299,61 +302,9 @@
       g.translate(guideSil.width, 0);
       g.scale(-1, 1);
       g.drawImage(silhouette, 0, 0);
-      contour = buildContour();
     };
     silhouette.src = 'silhouette.png?v=' + Date.now();   // 바꾼 실루엣이 예전 것으로 보이지 않게 항상 새로 받음
     const ASPECT = 0.763;        // 실루엣 가로/세로 비율
-
-    // 불똥이 윤곽선 (화면에 보이는 모양, 0~1 좌표). 맨 위 불꽃 끝에서 시작해
-    // 오른쪽으로 도는 길(a)과 왼쪽으로 도는 길(b)로 나눠, 스캔하면서 두 길이 아래에서 만나게 그림
-    let contour = null;
-    function buildContour() {
-      const H = 260, W = Math.round(H * ASPECT), w = W + 2, h = H + 2;
-      const c = document.createElement('canvas');
-      c.width = w; c.height = h;
-      const cc = c.getContext('2d', { willReadFrequently: true });
-      cc.drawImage(guideSil, 1, 1, W, H);
-      const d = cc.getImageData(0, 0, w, h).data;
-      const inside = (x, y) => x >= 0 && y >= 0 && x < w && y < h && d[(y * w + x) * 4 + 3] > 127;
-
-      // 맨 위(불꽃 끝) 픽셀에서 시작해 테두리를 따라 한 바퀴 (Moore 경계 추적, 시계 방향)
-      let sx = -1, sy = -1;
-      find: for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (inside(x, y)) { sx = x; sy = y; break find; }
-      const dirs = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
-      const raw = [[sx, sy]];
-      let cx = sx, cy = sy, start = 0;
-      for (let it = 0; it < w * h; it++) {
-        let moved = false;
-        for (let k = 0; k < 8; k++) {
-          const di = (start + k) % 8, nx = cx + dirs[di][0], ny = cy + dirs[di][1];
-          if (inside(nx, ny)) { cx = nx; cy = ny; start = (di + 6) % 8; moved = true; break; }
-        }
-        if (!moved || (cx === sx && cy === sy)) break;
-        raw.push([cx, cy]);
-      }
-
-      // 계단 모양을 줄이려고 듬성듬성 고른 뒤 두 번 부드럽게 (Chaikin)
-      let pts = raw.filter((_, i) => i % 3 === 0);
-      for (let pass = 0; pass < 2; pass++) {
-        const out = [];
-        for (let i = 0; i < pts.length; i++) {
-          const p = pts[i], q = pts[(i + 1) % pts.length];
-          out.push([p[0] * 0.75 + q[0] * 0.25, p[1] * 0.75 + q[1] * 0.25], [p[0] * 0.25 + q[0] * 0.75, p[1] * 0.25 + q[1] * 0.75]);
-        }
-        pts = out;
-      }
-      const norm = pts.map(([x, y]) => ({ x: (x - 1) / W, y: (y - 1) / H }));
-
-      // 두 갈래: 둘레 길이의 절반 지점(아래 가운데쯤)에서 만남
-      const seg = (p, q) => Math.hypot((p.x - q.x) * ASPECT, p.y - q.y);
-      let total = 0;
-      for (let i = 0; i < norm.length; i++) total += seg(norm[i], norm[(i + 1) % norm.length]);
-      let acc = 0, mid = 0;
-      while (mid < norm.length - 1 && acc < total / 2) { acc += seg(norm[mid], norm[mid + 1]); mid++; }
-      const a = norm.slice(0, mid + 1);
-      const b = norm.slice(mid).concat([norm[0]]).reverse();
-      return { all: norm, a, b };
-    }
 
     // 화면에 그리는 틀 위치
     function guideBox() {
@@ -399,6 +350,7 @@
       const white = make(); band(white, 0, SCAN_LINE_W, '#fff');
       const whiteBold = make(); band(whiteBold, 0, SCAN_LINE_W_BOLD, '#fff');
       const accent = make(); band(accent, 0, SCAN_LINE_W, GUIDE_COLOR);
+      const accentBold = make(); band(accentBold, 0, SCAN_LINE_W_BOLD, GUIDE_COLOR);
       const bold = make(); band(bold, 0, GUIDE_STROKE_BOLD, GUIDE_COLOR);   // '대비 높이기'용 두꺼운 선
 
       // 은은한 빛: 틀 바깥으로만 퍼짐 (틀 안의 불똥이·사람 얼굴은 가리지 않게) — 한 번만 만들어 둠
@@ -417,7 +369,7 @@
       gc.globalAlpha = 1;
       gc.globalCompositeOperation = 'destination-out';
       gc.drawImage(guideSil, GLOW_PAD + 6, GLOW_PAD + 6, w, h);
-      Object.assign(guideCache, { key, fill, ring, bold, glow, white, whiteBold, accent });
+      Object.assign(guideCache, { key, fill, ring, bold, glow, white, whiteBold, accent, accentBold });
       return guideCache;
     }
 
@@ -1187,6 +1139,7 @@
       uniform vec4 uTint;           // 유리 틴트 색 + 세기 (하단 바 배경색과 맞춤)
       uniform float uShadow, uShadowOffset, uShadowBlur;   // 구멍 안 그림자
       uniform float uRim;           // 구멍 가장자리 유리 반사 세기 (0 = 없음)
+      uniform float uBlurPx;        // 흐림 반경 (화면 px)
       uniform vec2 uLight;          // 빛이 오는 방향 (포인터를 따라 살짝 움직임)
 
       // 화면 좌표 → 영상 텍스처 좌표 (거울 + 화면 채우기)
@@ -1229,13 +1182,15 @@
         vec2 center = uRes * 0.5;
         vec2 p = center + (px - center) / uMag;
         vec2 off = -n * slope * uRefract * open * (1.0 + uScan * uScanRefract);
-        float lod = uFrost + uScan * uScanFrost;   // 판 전체 고르게 흐림 (가장자리에 덜 흐린 띠가 생기지 않게), 스캔 중엔 더 흐리게
-        vec3 col;
-        col.r = textureLod(uVideo, videoUv(p + off * 1.00), lod).r;
-        col.g = textureLod(uVideo, videoUv(p + off * 1.12), lod).g;
-        col.b = textureLod(uVideo, videoUv(p + off * 1.25), lod).b;
-        vec3 soft = textureLod(uVideo, videoUv(p + off), lod + 1.5).rgb;
-        col = mix(col, soft, 0.4);
+        // 부드러운 흐림: 주변 24곳을 나선(황금각)으로 고르게 찍어 평균 → 줄인 영상을 키울 때 생기는 픽셀 계단이 없음
+        vec3 col = vec3(0.0);
+        for (int i = 0; i < 24; i++) {
+          float fi = float(i) + 0.5;
+          float r = sqrt(fi / 24.0) * uBlurPx;
+          float a = fi * 2.39996;
+          col += textureLod(uVideo, videoUv(p + off + vec2(cos(a), sin(a)) * r), uFrost).rgb;
+        }
+        col /= 24.0;
 
         // 젖빛 유리: 흐림만 주고 밝기는 원래 화면 그대로 유지 (어두워지지 않게)
         float l = dot(col, vec3(0.299, 0.587, 0.114));
@@ -1350,7 +1305,7 @@
 
       const U = {};
       for (const n of ['uVideo', 'uSdf', 'uRes', 'uVideoSize', 'uCover', 'uBox', 'uSdfRect', 'uRange',
-        'uTime', 'uAmount', 'uGlow', 'uBevel', 'uRefract', 'uFrost', 'uMag', 'uDim', 'uMotion', 'uLight', 'uScan', 'uScanFrost', 'uScanDim', 'uScanRefract', 'uSat', 'uTint', 'uShadow', 'uShadowOffset', 'uShadowBlur', 'uRim', 'uMask']) U[n] = gl.getUniformLocation(prog, n);
+        'uTime', 'uAmount', 'uGlow', 'uBevel', 'uRefract', 'uFrost', 'uMag', 'uDim', 'uMotion', 'uLight', 'uScan', 'uScanFrost', 'uScanDim', 'uScanRefract', 'uSat', 'uTint', 'uShadow', 'uShadowOffset', 'uShadowBlur', 'uRim', 'uMask', 'uBlurPx']) U[n] = gl.getUniformLocation(prog, n);
 
       const makeTex = (unit) => {
         const t = gl.createTexture();
@@ -1428,6 +1383,7 @@
           gl.uniform1f(U.uShadowOffset, 10);
           gl.uniform1f(U.uShadowBlur, 22);
           gl.uniform1f(U.uRim, GLASS_RIM);
+          gl.uniform1f(U.uBlurPx, reduceTransparency ? GLASS_BLUR_PX * 1.8 : GLASS_BLUR_PX);
 
           gl.clearColor(0, 0, 0, 0);
           gl.clear(gl.COLOR_BUFFER_BIT);
@@ -1497,11 +1453,11 @@
       ctx.globalAlpha = 1;
     }
 
-    // 스캔 윤곽선 (Face ID 등록 화면처럼)
-    //  - 희미한 흰 윤곽이 먼저 보이고, 스캔이 진행될수록 불꽃 끝에서 양쪽으로 흰 선이 그려져 아래에서 만남
-    //  - 다 그려지면(찍히는 순간) 강조색으로 바뀌고, 닫힐 때 불똥이 쪽으로 살짝 조여들며 사라짐
+    // 스캔 윤곽선
+    //  - 평소: 흰 윤곽선
+    //  - 스캔이 진행될수록 아래(발)부터 위(불꽃 끝)로 #FE3636이 차오름 (경계는 부드럽게)
+    //  - 다 차면 찍히고, 닫힐 때 불똥이 쪽으로 살짝 조여들며 사라짐
     function drawScanOutline(g) {
-      if (!contour) return;
       const now = performance.now();
       const justCaptured = !guideOn && now - capturedAt < RELEASE_S * 1000 + 100;
       const progress = justCaptured ? 1 : glow;
@@ -1509,37 +1465,28 @@
       const cx = g.x + g.w / 2, cy = g.y + g.h / 2;
       const img = guideImages(g.w, g.h);
       // 선은 구멍과 같은 실루엣에서 딴 띠 그림 → 가장자리와 정확히 겹침
-      const line = justCaptured ? img.accent : highContrast ? img.whiteBold : img.white;
+      const white = highContrast ? img.whiteBold : img.white;
       const x = g.x - 6, y = g.y - 6;
       ctx.save();
       if (shrink !== 1) { ctx.translate(cx, cy); ctx.scale(shrink, shrink); ctx.translate(-cx, -cy); }
-      // 바탕: 희미한 전체 윤곽
-      ctx.globalAlpha = presence * (highContrast ? 0.6 : 0.3);
-      ctx.drawImage(highContrast ? img.whiteBold : img.white, x, y);
-      // 진행: 불꽃 끝에서 양쪽으로 그려 내려감 (윤곽 경로를 굵게 칠한 만큼만 선을 보여줌)
+      ctx.globalAlpha = presence * 0.9;
+      ctx.drawImage(white, x, y);
       if (progress > 0.002) {
-        if (prog.width !== line.width || prog.height !== line.height) { prog.width = line.width; prog.height = line.height; }
+        // 강조색 선을 그린 뒤, 아래쪽(차오른 높이까지)만 남기고 위는 부드럽게 지움
+        const red = highContrast ? img.accentBold : img.accent;
+        if (prog.width !== red.width || prog.height !== red.height) { prog.width = red.width; prog.height = red.height; }
         progc.globalCompositeOperation = 'source-over';
         progc.clearRect(0, 0, prog.width, prog.height);
-        progc.drawImage(line, 0, 0);
+        progc.drawImage(red, 0, 0);
+        const top = 6 + g.h * (1 - progress);   // 이 높이 아래까지 색이 참
+        const grad = progc.createLinearGradient(0, top - FILL_FEATHER, 0, top + FILL_FEATHER);
+        grad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+        grad.addColorStop(1, 'rgba(0, 0, 0, 1)');
         progc.globalCompositeOperation = 'destination-in';
-        progc.lineCap = 'round';
-        progc.lineJoin = 'round';
-        progc.lineWidth = 18;
-        for (const half of [contour.a, contour.b]) {
-          const path = new Path2D();
-          let len = 0, px = 0, py = 0;
-          half.forEach((p, i) => {
-            const X = 6 + p.x * g.w, Y = 6 + p.y * g.h;
-            if (i) { path.lineTo(X, Y); len += Math.hypot(X - px, Y - py); } else path.moveTo(X, Y);
-            px = X; py = Y;
-          });
-          progc.setLineDash([len * progress, len + 10]);
-          progc.stroke(path);
-        }
-        progc.setLineDash([]);
+        progc.fillStyle = grad;
+        progc.fillRect(0, 0, prog.width, prog.height);
         ctx.globalAlpha = presence;
-        if (!highContrast) { ctx.shadowColor = justCaptured ? 'rgba(254, 54, 54, 0.5)' : 'rgba(255, 255, 255, 0.45)'; ctx.shadowBlur = 4; }
+        if (!highContrast) { ctx.shadowColor = 'rgba(254, 54, 54, 0.45)'; ctx.shadowBlur = 6; }
         ctx.drawImage(prog, x, y);
       }
       ctx.restore();
