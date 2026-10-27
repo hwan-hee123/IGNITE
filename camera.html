@@ -93,7 +93,16 @@
 
     // ---------- 불똥이 실루엣 (틀) ----------
 
+    // silhouette = 영상 원본 기준 모양, guideSil = 화면(거울)에 보이는 틀 모양 (좌우반전)
     const silhouette = new Image();
+    const guideSil = document.createElement('canvas');
+    silhouette.onload = () => {
+      guideSil.width = silhouette.width; guideSil.height = silhouette.height;
+      const g = guideSil.getContext('2d');
+      g.translate(guideSil.width, 0);
+      g.scale(-1, 1);
+      g.drawImage(silhouette, 0, 0);
+    };
     silhouette.src = 'silhouette.png';
     const ASPECT = 0.761;        // 실루엣 가로/세로 비율
 
@@ -124,11 +133,11 @@
       const make = () => { const c = document.createElement('canvas'); c.width = Math.round(w) + 12; c.height = Math.round(h) + 12; return c; };
       const fill = make(), ring = make();
       const f = fill.getContext('2d');
-      f.drawImage(silhouette, 6, 6, w, h);
+      f.drawImage(guideSil, 6, 6, w, h);
       const r = ring.getContext('2d');
-      for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) r.drawImage(silhouette, 6 + Math.cos(a) * 4, 6 + Math.sin(a) * 4, w, h);
+      for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) r.drawImage(guideSil, 6 + Math.cos(a) * 4, 6 + Math.sin(a) * 4, w, h);
       r.globalCompositeOperation = 'destination-out';
-      r.drawImage(silhouette, 6, 6, w, h);
+      r.drawImage(guideSil, 6, 6, w, h);
       const hot = make(), hc = hot.getContext('2d');
       hc.drawImage(ring, 0, 0);
       hc.globalCompositeOperation = 'source-in';
@@ -138,7 +147,7 @@
       return guideCache;
     }
 
-    // 인식용: work 크기에 맞춘 실루엣 (영상 원본 기준이라 좌우반전)
+    // 인식용: work 크기에 맞춘 실루엣 (영상 원본 기준 모양)
     const tplCache = { key: '', g: null, area: 0 };
     function tplGrid(w, h) {
       const key = w + 'x' + h;
@@ -147,8 +156,6 @@
       c.width = w; c.height = h;
       const cc = c.getContext('2d', { willReadFrequently: true });
       const mx = w * MARGIN / (1 + MARGIN * 2), my = h * MARGIN / (1 + MARGIN * 2);
-      cc.translate(w, 0);
-      cc.scale(-1, 1);
       cc.drawImage(silhouette, mx, my, w - mx * 2, h - my * 2);
       const d = cc.getImageData(0, 0, w, h).data;
       const g = new Uint8Array(w * h);
@@ -387,10 +394,8 @@
       out.width = Math.round(r.w * scale); out.height = Math.round(r.h * scale);
       const o = out.getContext('2d');
       o.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, out.width, out.height);
-      // 영상 원본은 좌우반전 전이라 틀도 반전해서 오림
+      // 영상 원본 기준 모양으로 오림 (화면 틀을 거울로 뒤집은 모양)
       o.globalCompositeOperation = 'destination-in';
-      o.translate(out.width, 0);
-      o.scale(-1, 1);
       o.drawImage(silhouette, 0, 0, out.width, out.height);
       return out;
     }
@@ -573,7 +578,7 @@
       fxc.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, fx.width, fx.height);
       fxc.restore();
       fxc.globalCompositeOperation = 'destination-in';
-      fxc.drawImage(silhouette, 0, 0, fx.width, fx.height);
+      fxc.drawImage(guideSil, 0, 0, fx.width, fx.height);
       fxc.globalCompositeOperation = 'source-over';
       ctx.drawImage(fx, g.x, g.y, g.w, g.h);
     }
@@ -614,7 +619,7 @@
         drawVideo(focus * 14);
         if (focus > 0.05) drawSharpInside(g);
       }
-      if (silhouette.complete && showUI) drawGuide(g);
+      if (guideSil.width && showUI) drawGuide(g);
       if (debug) drawDebug();
 
       updateHands(now, dt);
