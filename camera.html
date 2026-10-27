@@ -161,6 +161,10 @@
     const EMBER_RATE = 3.5;      // 불똥이 하나가 1초에 머리 위로 피워 올리는 불티 수
     const LAND_SPARKS = 5;       // 착지할 때 튀는 불꽃 수 (EMBER_SCALE 적용 전)
     const PARTICLE_MAX = 300;    // 화면 전체 불티·불꽃 최대 개수 (아이맥이 무거워지지 않게)
+    const THROW_SPEED = 1100;    // 손을 이보다 빠르게(px/초) 휙 놓으면 "던짐" → 화면 밖으로 날아감
+    const THROW_GRAVITY = 1400;  // 던진 뒤 떨어지는 힘 (px/초²)
+    const SMOKE_PUFFS = 9;       // 불이 꺼질 때 피어오르는 연기 덩어리 수
+    const SMOKE_ALPHA = 0.32;    // 연기 진하기
     const TURN_THRESHOLD = 0.2;  // 좌우 속도가 이보다 커야 돌아섬 (작은 흔들림엔 그대로)
     const LIFT_SCALE = 0.08;     // 떠오를 때 커지는 비율
     const LIFT_RAISE = 0.04;     // 떠오를 때 올라가는 높이 (틀 키 비율)
@@ -514,7 +518,7 @@
     function grabbable(p) {
       let best = null, bestD = Infinity;
       for (const s of sprites) {
-        if (s.holder) continue;
+        if (s.holder || s.thrown) continue;   // 이미 잡혔거나 날아가는 중이면 못 잡음
         const d = Math.hypot(p.x - s.x, p.y - (s.y - s.h * 0.5));
         if (d < s.h * GRAB_RADIUS && d < bestD) { best = s; bestD = d; }
       }
@@ -537,9 +541,16 @@
       const s = p.sprite;
       if (!s) return;
       s.holder = null;
-      // 던진 방향으로 달려가게
       const sp = Math.hypot(p.vx, p.vy);
-      if (sp > 200) { s.vx = p.vx / sp; s.vy = p.vy / sp; s.turnIn = 1.5; }
+      if (sp > THROW_SPEED) {
+        // 세게 던지면: 그 속도 그대로 포물선을 그리며 날아가 화면 밖에서 불이 꺼짐
+        s.thrown = true;
+        s.tvx = p.vx; s.tvy = p.vy;
+        s.spinV = Math.max(-8, Math.min(8, p.vx * 0.004));
+      } else if (sp > 200) {
+        // 살짝 던지면: 그 방향으로 달려감
+        s.vx = p.vx / sp; s.vy = p.vy / sp; s.turnIn = 1.5;
+      }
       s.fallV = 0;
       p.sprite = null;
     }
@@ -712,14 +723,24 @@
       update(dt) {
         this.age += dt;
         this.hover += ((this.hovered ? 1 : 0) - this.hover) * (reduceMotion ? 1 : Math.min(1, dt * 12));
-        // 머리 위 불꽃 끝에서 불티가 피어오름 (등장 연출이 끝난 뒤부터, 들고 있을 때도)
+        // 머리 위 불꽃 끝에서 불티가 피어오름 (등장 연출이 끝난 뒤부터, 들고 있을 때도, 날아갈 땐 꼬리처럼 더 많이)
         if (this.age > this.liftTime() + ENTER_SHRINK_S) {
           this.emberT = (this.emberT ?? Math.random() / EMBER_RATE) - dt;
           if (this.emberT <= 0) {
-            this.emberT = (0.5 + Math.random()) / EMBER_RATE;
+            this.emberT = (0.5 + Math.random()) / (EMBER_RATE * (this.thrown ? 4 : 1));
             const scale = this.held ? 1.1 : 1;
             ember(this.x + (Math.random() - 0.5) * this.w * 0.12, this.y - (this.lastLift || 0) - this.h * 0.93 * scale);
           }
+        }
+        if (this.thrown) {
+          // 던져진 뒤: 포물선 + 회전, 화면을 완전히 벗어나면 불이 꺼지며 연기
+          this.x += this.tvx * dt;
+          this.y += this.tvy * dt;
+          this.tvy += THROW_GRAVITY * dt;
+          this.spin = (this.spin || 0) + this.spinV * dt;
+          const out = this.x + this.w / 2 < 0 || this.x - this.w / 2 > innerWidth || this.y < 0 || this.y - this.h > innerHeight;
+          if (out) extinguish(this);
+          return;
         }
         if (this.held) {
           // 집혀 있는 동안: 손을 따라가며 대롱대롱
@@ -774,7 +795,7 @@
       // 발밑 그림자: 가장자리가 부드럽게 흐려지고, 높이 뛸수록 작고 옅어짐 (집혀 있을 땐 없음)
       // 모든 불똥이 몸보다 먼저 그려서 다른 불똥이 머리 위에 그림자가 얹히지 않게
       drawShadow() {
-        if (this.held) return;
+        if (this.held || this.thrown) return;
         const s = Math.abs(Math.sin(this.hop));
         const air = this.age < this.liftTime() + ENTER_SHRINK_S ? 0 : s;
         softEllipse(this.x, this.y, this.w * 0.42 * (1 - air * 0.3), this.h * 0.07 * (1 - air * 0.3), SHADOW_ALPHA * (1 - air * 0.5));
@@ -807,7 +828,14 @@
         const tilt = this.held ? -(this.swing || 0) : this.vx * 0.12 + Math.sin(this.hop * 2) * 0.05 - (this.swing || 0);
         ctx.save();
         ctx.translate(this.x, this.y - lift);
-        ctx.rotate(Math.max(-0.6, Math.min(0.6, tilt)));
+        if (this.thrown) {
+          // 날아가는 동안 몸 가운데를 축으로 빙글
+          ctx.translate(0, -this.h / 2);
+          ctx.rotate(this.spin || 0);
+          ctx.translate(0, this.h / 2);
+        } else {
+          ctx.rotate(Math.max(-0.6, Math.min(0.6, tilt)));
+        }
         // 돌아서는 중간엔 너무 납작해지지 않게 최소 폭을 둠
         const faceX = Math.sign(this.face || 1) * Math.max(0.12, Math.abs(this.face));
         ctx.scale(size * squash * grabbed * faceX, size / squash * grabbed);
@@ -869,6 +897,13 @@
     function updateParticles(dt) {
       for (const p of particles) {
         if (p.kind === 'puff') { p.life -= dt / 0.45; continue; }
+        if (p.kind === 'smoke') {
+          if (p.delay > 0) { p.delay -= dt; continue; }
+          p.x += p.vx * dt; p.y += p.vy * dt;
+          p.vx *= 1 - dt * 0.8; p.vy = p.vy * (1 - dt * 0.5) - 12 * dt;   // 점점 느려지며 위로
+          p.life -= dt / p.dur;
+          continue;
+        }
         if (p.kind === 'ember') {
           p.wob += dt * 5;
           p.x += (p.vx + Math.sin(p.wob) * 18) * dt;   // 아지랑이처럼 좌우로 흔들
@@ -881,6 +916,46 @@
         p.life -= dt / p.dur;
       }
       particles = particles.filter(p => p.life > 0);
+    }
+
+    // 화면 밖으로 나간 불똥이: 나간 자리(화면 가장자리)에서 불이 치익 꺼지고 연기가 피어오름
+    function extinguish(s) {
+      s.gone = true;
+      if (reduceMotion) return;   // '동작 줄이기'면 조용히 사라짐
+      const ex = Math.min(innerWidth - 8, Math.max(8, s.x));
+      const ey = Math.min(innerHeight - 8, Math.max(8, s.y - s.h / 2));
+      // 화면 안쪽 방향 (연기가 가장자리에서 안으로 살짝 밀려 들어오게)
+      const ix = s.x < 0 ? 1 : s.x > innerWidth ? -1 : 0;
+      const iy = s.y - s.h / 2 < 0 ? 1 : s.y - s.h / 2 > innerHeight ? -1 : 0;
+      spark(ex, ey, 6);   // 꺼지기 직전 마지막 불꽃
+      for (let i = 0; i < SMOKE_PUFFS && particles.length < PARTICLE_MAX; i++) {
+        particles.push({
+          kind: 'smoke',
+          x: ex + (Math.random() - 0.5) * s.w * 0.3, y: ey + (Math.random() - 0.5) * s.w * 0.3,
+          vx: ix * (25 + Math.random() * 35) + (Math.random() - 0.5) * 20,
+          vy: iy * (25 + Math.random() * 35) - (30 + Math.random() * 40),   // 위로 피어오름
+          r0: s.w * (0.12 + Math.random() * 0.1), grow: s.w * (0.5 + Math.random() * 0.4),
+          life: 1, dur: 1.4 + Math.random() * 0.9, delay: i * 0.04
+        });
+      }
+    }
+
+    // 연기: 회색 반투명 덩어리가 커지며 위로 흩어짐 (테두리 없이 부드럽게)
+    function drawSmoke() {
+      for (const p of particles) {
+        if (p.kind !== 'smoke' || p.delay > 0) continue;
+        const t = 1 - p.life, e = 1 - Math.pow(1 - t, 2);
+        const r = p.r0 + p.grow * e;
+        const a = SMOKE_ALPHA * Math.min(1, t * 6) * p.life;   // 빠르게 짙어졌다 천천히 옅어짐
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+        g.addColorStop(0, `rgba(200, 200, 205, ${a})`);
+        g.addColorStop(0.5, `rgba(170, 170, 178, ${a * 0.6})`);
+        g.addColorStop(1, 'rgba(160, 160, 168, 0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
 
     // 불 온도 색: 막 튀었을 땐 하양-노랑, 식을수록 주황 → 빨강(#FE3636)
@@ -904,7 +979,7 @@
       ctx.globalCompositeOperation = 'lighter';
       ctx.lineCap = 'round';
       for (const p of particles) {
-        if (p.kind === 'puff') continue;
+        if (p.kind === 'puff' || p.kind === 'smoke') continue;
         const t = p.life, a = Math.min(1, t * 1.6) * (p.kind === 'ember' ? 0.9 : 1);
         // 불티는 꺼지기 직전 살짝 깜빡임
         const flick = p.kind === 'ember' && t < 0.35 ? 0.6 + 0.4 * Math.sin(p.wob * 3) : 1;
@@ -1429,12 +1504,17 @@
       // 집고 있는 불똥이는 맨 앞에
       sprites.sort((a, b) => (a.held - b.held) || (a.y - b.y));
       for (const s of sprites) s.update(dt);
+      if (sprites.some(s => s.gone)) {
+        for (const p of pinches) if (p.sprite && p.sprite.gone) p.sprite = null;
+        sprites = sprites.filter(s => !s.gone);
+      }
       updateParticles(dt);
       // 바닥 층(그림자·먼지) → 불똥이 몸 → 불씨 → 손 커서 순서로
       drawPuffs();
       for (const s of sprites) s.drawShadow();
       for (const s of sprites) s.draw();
       drawEmbers();
+      drawSmoke();
       drawPinchCursors(dt);
 
       // 찍힘 신호: 아이폰 셔터처럼 아주 짧게 살짝 어두워졌다 돌아옴 (하얀 번쩍임은 휴대폰 촬영을 방해해서 X)
