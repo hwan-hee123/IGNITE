@@ -150,10 +150,9 @@
     const MAX_SPRITES = 10;      // 화면에 동시에 뛰어다니는 불똥이 수
     const GUIDE_H = 0.55;        // 화면에 보이는 불똥이 틀의 키 (화면 높이 비율)
     const GUIDE_COLOR = '#FE3636';               // 불똥이 틀 테두리 색
-    // 스캔 장면 (Face ID 등록 · Siri 화면 가장자리 빛 참고)
+    // 스캔 장면 (Face ID 등록 화면 참고)
     const SCAN_LINE_W = 2.5;     // 윤곽선 굵기 (px)
     const SCAN_LINE_W_BOLD = 4;  // '대비 높이기' 설정일 때 윤곽선 굵기
-    const EDGE_GLOW = [[110, 0.06], [60, 0.1], [28, 0.16], [10, 0.28]];   // 화면 가장자리 불빛 [굵기 px, 세기]
     // WebGL이 안 될 때 쓰는 간단한 유리의 테두리
     const GUIDE_STROKE = 3;      // 선 굵기 (px)
     const GUIDE_STROKE_BOLD = 5; // '대비 높이기' 설정일 때 선 굵기
@@ -189,12 +188,13 @@
     const RELEASE_S = 0.45;      // 찍힌 뒤 유리가 풀리며 사라지는 시간
     // 틀 밖 배경 (WebGL) — 짙고 흐린 어두운 소재: 빛이 틀 안 불똥이에게 모이게
     const GLASS_BEVEL = 0.04;    // 구멍 가장자리 둥근 경사면 폭 (틀 키 비율)
-    const GLASS_REFRACT_PX = 6;  // 경사면에서 뒤 화면이 휘는 정도 (px, 아주 살짝만)
+    const GLASS_REFRACT_PX = 0;  // 경사면에서 뒤 화면이 휘는 정도 (0 = 안 휨, 밝은 배경이 틀 밖으로 번지지 않게)
+    const GLASS_RIM = 0;         // 틀 가장자리 유리 반사광 (0 = 없음, 흰 윤곽선만)
     const GLASS_FROST = 4.2;     // 판의 흐림 정도
     const GLASS_FROST_SOLID = 5.5; // '투명도 줄이기' 설정일 때 흐림 정도
     const GLASS_SAT = 1.15;      // 채도 (색이 튀지 않게 거의 그대로)
     const GLASS_TINT_DARK = 0.58; // 어두운 틴트 세기 (클수록 틀 밖이 어두워짐)
-    const GLASS_SHADOW = 0.22;   // 구멍 안 그림자 (유리판이 떠 있는 느낌)
+    const GLASS_SHADOW = 0;      // 구멍 안 그림자 (0 = 없음, 틀 안을 깨끗하게)
     const GLASS_MAG = 1.0;       // 유리 뒤 화면 확대 (1 = 확대 없음, 키우면 화면이 커져 보임)
     const GLASS_DIM_MAX = 0.35;  // 밝은 배경일 때 어둡게 하는 막 (HIG 권장 35%)
     // WebGL이 안 될 때 쓰는 간단한 유리
@@ -1182,6 +1182,7 @@
       uniform float uSat;           // 채도 (하단 바 saturate(180%)와 맞춤)
       uniform vec4 uTint;           // 유리 틴트 색 + 세기 (하단 바 배경색과 맞춤)
       uniform float uShadow, uShadowOffset, uShadowBlur;   // 구멍 안 그림자
+      uniform float uRim;           // 구멍 가장자리 유리 반사 세기 (0 = 없음)
       uniform vec2 uLight;          // 빛이 오는 방향 (포인터를 따라 살짝 움직임)
 
       // 화면 좌표 → 영상 텍스처 좌표 (거울 + 화면 채우기)
@@ -1202,11 +1203,8 @@
         float boxH = uBox.w;
         float open = uAmount;
 
-        // 가장자리가 물처럼 살짝 일렁임
-        vec2 c = uBox.xy + uBox.zw * 0.5;
-        float ang = atan(px.y - c.y, px.x - c.x);
-        float wob = sin(ang * 5.0 + uTime * 1.3) * 0.6 + sin(ang * 3.0 - uTime * 0.9) * 0.4;
-        float d = sdf(px) * boxH + wob * 0.8 * uMotion;
+        // 틀 가장자리는 실루엣 그대로 또렷하게 (일렁임 없음)
+        float d = sdf(px) * boxH;
         // 나타날 때 구멍이 작게 시작해서 열림
         d += (1.0 - open) * boxH * 0.1;
 
@@ -1232,7 +1230,7 @@
         vec2 center = uRes * 0.5;
         vec2 p = center + (px - center) / uMag;
         vec2 off = -n * slope * uRefract * open * (1.0 + uScan * uScanRefract);
-        float lod = uFrost * (0.6 + 0.4 * t) + uScan * uScanFrost;   // 가장자리는 덜 흐리게, 스캔 중엔 더 흐리게
+        float lod = uFrost + uScan * uScanFrost;   // 판 전체 고르게 흐림 (가장자리에 덜 흐린 띠가 생기지 않게), 스캔 중엔 더 흐리게
         vec3 col;
         col.r = textureLod(uVideo, videoUv(p + off * 1.00), lod).r;
         col.g = textureLod(uVideo, videoUv(p + off * 1.12), lod).g;
@@ -1253,7 +1251,7 @@
         float spec2 = pow(max(dot(n, L), 0.0), 8.0) * slope * slope * 0.25;
         float edgeLine = exp(-max(d, 0.0) / 0.9);       // 0.5px 유리선
         vec3 rimColor = mix(vec3(1.0), vec3(1.0, 0.45, 0.45), uGlow);
-        col += rimColor * (spec * 0.7 + spec2 + edgeLine * 0.3);
+        col += rimColor * (spec * 0.7 + spec2 + edgeLine * 0.3) * uRim;   // 틀 테두리는 흰 윤곽선이 맡아서 유리 반사는 끔(uRim 0)
 
         // 불똥이가 틀에 들어오면 가장자리 유리가 주황빛으로 달아오름
         col += vec3(0.996, 0.212, 0.212) * uGlow * exp(-d / (boxH * 0.05)) * 0.4;   // #FE3636
@@ -1353,7 +1351,7 @@
 
       const U = {};
       for (const n of ['uVideo', 'uSdf', 'uRes', 'uVideoSize', 'uCover', 'uBox', 'uSdfRect', 'uRange',
-        'uTime', 'uAmount', 'uGlow', 'uBevel', 'uRefract', 'uFrost', 'uMag', 'uDim', 'uMotion', 'uLight', 'uScan', 'uScanFrost', 'uScanDim', 'uScanRefract', 'uSat', 'uTint', 'uShadow', 'uShadowOffset', 'uShadowBlur']) U[n] = gl.getUniformLocation(prog, n);
+        'uTime', 'uAmount', 'uGlow', 'uBevel', 'uRefract', 'uFrost', 'uMag', 'uDim', 'uMotion', 'uLight', 'uScan', 'uScanFrost', 'uScanDim', 'uScanRefract', 'uSat', 'uTint', 'uShadow', 'uShadowOffset', 'uShadowBlur', 'uRim']) U[n] = gl.getUniformLocation(prog, n);
 
       const makeTex = (unit) => {
         const t = gl.createTexture();
@@ -1423,6 +1421,7 @@
           gl.uniform1f(U.uShadow, GLASS_SHADOW);
           gl.uniform1f(U.uShadowOffset, 10);
           gl.uniform1f(U.uShadowBlur, 22);
+          gl.uniform1f(U.uRim, GLASS_RIM);
 
           gl.clearColor(0, 0, 0, 0);
           gl.clear(gl.COLOR_BUFFER_BIT);
@@ -1527,33 +1526,12 @@
       if (progress > 0.002) {
         ctx.globalAlpha = presence;
         ctx.strokeStyle = justCaptured ? GUIDE_COLOR : '#fff';
-        if (!highContrast) { ctx.shadowColor = justCaptured ? 'rgba(254, 54, 54, 0.6)' : 'rgba(255, 255, 255, 0.55)'; ctx.shadowBlur = 8; }
+        if (!highContrast) { ctx.shadowColor = justCaptured ? 'rgba(254, 54, 54, 0.5)' : 'rgba(255, 255, 255, 0.4)'; ctx.shadowBlur = 4; }
         for (const half of [contour.a, contour.b]) {
           const { path, len } = build(half);
           ctx.setLineDash([len * progress, len + 10]);
           ctx.stroke(path);
         }
-      }
-      ctx.restore();
-    }
-
-    // 화면 가장자리 불빛 (Siri처럼): 불 색 그라데이션이 천천히 돌며 숨 쉬듯, 불똥이가 들어오면 더 밝게
-    function drawEdgeGlow(amount, t) {
-      if (amount < 0.01 || highContrast) return;
-      const W = innerWidth, H = innerHeight, R = Math.hypot(W, H) / 2;
-      const ang = reduceMotion ? -0.8 : t * 0.35;
-      const gr = ctx.createLinearGradient(W / 2 + Math.cos(ang) * R, H / 2 + Math.sin(ang) * R, W / 2 - Math.cos(ang) * R, H / 2 - Math.sin(ang) * R);
-      gr.addColorStop(0, '#FE3636');
-      gr.addColorStop(0.35, '#FF7A3D');
-      gr.addColorStop(0.65, '#FFC15E');
-      gr.addColorStop(1, '#FE3636');
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.strokeStyle = gr;
-      for (const [lw, a] of EDGE_GLOW) {   // 굵고 옅은 빛부터 가늘고 진한 빛까지 겹쳐 부드럽게 번지게
-        ctx.globalAlpha = amount * a;
-        ctx.lineWidth = lw;
-        ctx.strokeRect(0, 0, W, H);
       }
       ctx.restore();
     }
@@ -1611,8 +1589,6 @@
         const capTop = Math.round(g.y + g.h + 28);
         if (caption.dataset.top !== String(capTop)) { caption.style.top = capTop + 'px'; caption.dataset.top = capTop; }
         if (showGuide) {
-          const breathe = reduceMotion ? 1 : 0.85 + 0.15 * Math.sin(now / 1000 * 1.6);
-          drawEdgeGlow(presence * (0.55 + 0.45 * glow) * breathe, now / 1000);
           drawScanOutline(g);
         }
       }
