@@ -151,6 +151,8 @@
 
     const MAX_SPRITES = 10;      // 화면에 동시에 뛰어다니는 불똥이 수
     const GUIDE_H = 0.55;        // 화면에 보이는 불똥이 틀의 키 (화면 높이 비율)
+    const GUIDE_COLOR = '#FE3636';               // 불똥이 틀 테두리 색
+    const GUIDE_GLOW = 'rgba(254, 54, 54, 0.7)'; // 테두리 주변 은은한 빛 (같은 색)
     const WORK_W = 200;          // 인식용 축소 해상도 (가로)
     const MARGIN = 0.15;         // 틀 바깥으로 얼마나 더 보고 판단할지 (틀 크기 비율)
     const COVER_OK = 0.8;        // 틀 안이 불똥이로 이만큼 차 있어야 함
@@ -303,6 +305,9 @@
       for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) r.drawImage(guideSil, 6 + Math.cos(a) * 4, 6 + Math.sin(a) * 4, w, h);
       r.globalCompositeOperation = 'destination-out';
       r.drawImage(guideSil, 6, 6, w, h);
+      r.globalCompositeOperation = 'source-in';   // 테두리 색
+      r.fillStyle = GUIDE_COLOR;
+      r.fillRect(0, 0, ring.width, ring.height);
       const hot = make(), hc = hot.getContext('2d');
       hc.drawImage(ring, 0, 0);
       hc.globalCompositeOperation = 'source-in';
@@ -1119,7 +1124,7 @@
       // 테두리: 흰색 → 불똥이가 들어오면 주황으로 빛남 (틀을 띄웠을 때만 보임)
       // 어떤 배경에서도 보이게 은은한 빛을 두름
       ctx.globalAlpha = (armed ? 0.95 : 0.4) * (1 - progress) * presence;
-      ctx.shadowColor = 'rgba(255, 255, 255, 0.7)';
+      ctx.shadowColor = GUIDE_GLOW;
       ctx.shadowBlur = 10;
       ctx.drawImage(img.ring, g.x - 6, g.y - 6);
       ctx.shadowBlur = 0;
