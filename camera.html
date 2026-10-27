@@ -251,7 +251,7 @@
       g.scale(-1, 1);
       g.drawImage(silhouette, 0, 0);
     };
-    silhouette.src = 'silhouette.png';
+    silhouette.src = 'silhouette.png?v=' + Date.now();   // 바꾼 실루엣이 예전 것으로 보이지 않게 항상 새로 받음
     const ASPECT = 0.763;        // 실루엣 가로/세로 비율
 
     // 화면에 그리는 틀 위치
