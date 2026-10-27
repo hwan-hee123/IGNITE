@@ -158,10 +158,10 @@
     const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 캡처 (약 1초)
     // 리퀴드 글라스 (WebGL) — HIG: 사진·영상 위에는 투명한 clear 변형
     const GLASS_BEVEL = 0.05;    // 구멍 가장자리 둥근 경사면 폭 (틀 키 비율)
-    const GLASS_REFRACT_PX = 24; // 경사면에서 뒤 화면이 휘는 정도 (px)
+    const GLASS_REFRACT_PX = 16; // 경사면에서 뒤 화면이 휘는 정도 (px)
     const GLASS_FROST = 1.4;     // 판의 흐림 정도 (clear 변형이라 약하게)
     const GLASS_FROST_SOLID = 4; // '투명도 줄이기' 설정일 때 흐림 정도
-    const GLASS_MAG = 1.03;      // 유리 두께로 확대돼 보이는 정도
+    const GLASS_MAG = 1.0;       // 유리 뒤 화면 확대 (1 = 확대 없음, 키우면 화면이 커져 보임)
     const GLASS_DIM_MAX = 0.35;  // 밝은 배경일 때 어둡게 하는 막 (HIG 권장 35%)
     // WebGL이 안 될 때 쓰는 간단한 유리
     const GLASS_BLUR = 8;        // 흐림 정도 (px)
@@ -1052,9 +1052,13 @@
       const img = guideImages(g.w, g.h);
       const progress = armed && inside ? Math.min(1, stableCount / STABLE_NEEDED) : 0;
       ctx.save();
-      // 테두리: 흰색 → 불똥이가 들어오면 주황으로 빛남 (다가왔을 때만 보임)
-      ctx.globalAlpha = (armed ? 0.85 : 0.35) * (1 - progress) * presence;
+      // 테두리: 흰색 → 불똥이가 들어오면 주황으로 빛남 (틀을 띄웠을 때만 보임)
+      // 어떤 배경에서도 보이게 은은한 빛을 두름
+      ctx.globalAlpha = (armed ? 0.95 : 0.4) * (1 - progress) * presence;
+      ctx.shadowColor = 'rgba(255, 255, 255, 0.7)';
+      ctx.shadowBlur = 10;
       ctx.drawImage(img.ring, g.x - 6, g.y - 6);
+      ctx.shadowBlur = 0;
       if (progress > 0) {
         ctx.globalAlpha = progress * presence;
         ctx.shadowColor = '#ff7a1a';
@@ -1097,6 +1101,7 @@
             console.error('리퀴드 글라스 오류, 간단한 유리로 바꿀게요', e);
             liquidGlass = null;
           }
+          drawGuide(g);   // 유리 위에 불똥이 모양 테두리를 또렷하게
         } else if (showGuide) {
           drawGlass2D(g, presence);
           drawGuide(g);
