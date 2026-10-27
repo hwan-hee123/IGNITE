@@ -43,7 +43,7 @@
   </div>
 
   <script type="module">
-    import { FilesetResolver, InteractiveSegmenter }
+    import { FilesetResolver, InteractiveSegmenter, HandLandmarker }
       from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
 
     // 휴대폰/가상 카메라로 잡히는 장치 이름 (노트북 카메라만 쓰기 위해 제외)
@@ -59,6 +59,11 @@
 
     const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
     const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite';
+    const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+    const PINCH_ON = 0.35;       // 엄지-검지 거리가 손 크기의 이 비율보다 가까우면 "집음"
+    const PINCH_OFF = 0.5;       // 이보다 멀어지면 "놓음" (중간은 이전 상태 유지 → 덜 끊김)
+    const GRAB_RADIUS = 0.6;     // 불똥이 키의 이 비율 안에서 집으면 잡힘
 
     const video = document.getElementById('video');
     const stage = document.getElementById('stage');
@@ -70,6 +75,10 @@
     const wctx = work.getContext('2d', { willReadFrequently: true });
 
     let segmenter = null;
+    let hands = null;
+    let lastHandTime = -1;
+    // 핀치 커서 (화면 좌표). sprite = 지금 집고 있는 불똥이
+    const pinch = { visible: false, down: false, x: 0, y: 0, vx: 0, vy: 0, sprite: null, offX: 0, offY: 0 };
     let sprites = [];
     let particles = [];
     let showUI = true;
@@ -220,6 +229,99 @@
         outputCategoryMask: true, outputConfidenceMasks: false
       });
       try { segmenter = await make('GPU'); } catch (e) { segmenter = await make('CPU'); }
+
+      // 손 인식은 실패해도 사진 인식은 계속 되게 따로
+      const makeHands = (delegate) => HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: HAND_MODEL, delegate },
+        runningMode: 'VIDEO', numHands: 1
+      });
+      try { hands = await makeHands('GPU'); }
+      catch (e) {
+        try { hands = await makeHands('CPU'); } catch (e2) { console.error('손 인식을 불러오지 못했어요', e2); }
+      }
+    }
+
+    // ---------- 엄지·검지 핀치로 불똥이 잡기 ----------
+
+    // 영상 좌표(0~1) → 화면 좌표 (좌우반전)
+    function toScreen(p) {
+      const L = videoLayout();
+      return {
+        x: innerWidth - (p.x * video.videoWidth * L.s + L.ox),
+        y: p.y * video.videoHeight * L.s + L.oy
+      };
+    }
+
+    function updateHands(now, dt) {
+      if (!hands || !video.videoWidth || video.currentTime === lastHandTime) return;
+      lastHandTime = video.currentTime;
+      let res;
+      try { res = hands.detectForVideo(video, now); } catch (e) { return; }
+      const lm = res.landmarks && res.landmarks[0];
+      if (!lm) {
+        pinch.visible = false;
+        if (pinch.down) pinchEnd();
+        return;
+      }
+      // 손 크기(손목~가운데 손가락 뿌리) 대비 엄지 끝~검지 끝 거리
+      const size = Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y) || 1;
+      const gap = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) / size;
+      const p = toScreen({ x: (lm[4].x + lm[8].x) / 2, y: (lm[4].y + lm[8].y) / 2 });
+
+      // 살짝 부드럽게 따라가기 (손 떨림 줄이기)
+      const k = pinch.visible ? 0.5 : 1;
+      const nx = pinch.x + (p.x - pinch.x) * k, ny = pinch.y + (p.y - pinch.y) * k;
+      if (dt > 0 && pinch.visible) {
+        pinch.vx = pinch.vx * 0.6 + ((nx - pinch.x) / dt) * 0.4;
+        pinch.vy = pinch.vy * 0.6 + ((ny - pinch.y) / dt) * 0.4;
+      }
+      pinch.x = nx; pinch.y = ny;
+      pinch.visible = true;
+
+      if (!pinch.down && gap < PINCH_ON) pinchStart();
+      else if (pinch.down && gap > PINCH_OFF) pinchEnd();
+    }
+
+    function pinchStart() {
+      pinch.down = true;
+      // 집은 곳에서 가장 가까운 불똥이 (몸통 가운데 기준)
+      let best = null, bestD = Infinity;
+      for (const s of sprites) {
+        const cy = s.y - s.h * 0.5;
+        const d = Math.hypot(pinch.x - s.x, pinch.y - cy);
+        if (d < s.h * GRAB_RADIUS && d < bestD) { best = s; bestD = d; }
+      }
+      if (!best) return;
+      pinch.sprite = best;
+      pinch.offX = best.x - pinch.x;
+      pinch.offY = best.y - pinch.y;
+      best.held = true;
+      spark(pinch.x, pinch.y, 10);
+    }
+
+    function pinchEnd() {
+      pinch.down = false;
+      const s = pinch.sprite;
+      if (!s) return;
+      s.held = false;
+      // 던진 방향으로 달려가게
+      const sp = Math.hypot(pinch.vx, pinch.vy);
+      if (sp > 200) { s.vx = pinch.vx / sp; s.vy = pinch.vy / sp; s.turnIn = 1.5; }
+      s.fallV = 0;
+      pinch.sprite = null;
+    }
+
+    function drawPinchCursor() {
+      if (!pinch.visible) return;
+      ctx.save();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.fillStyle = pinch.down ? 'rgba(255, 122, 26, 0.9)' : 'rgba(255, 255, 255, 0.25)';
+      ctx.beginPath();
+      ctx.arc(pinch.x, pinch.y, pinch.down ? 10 : 16, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
     }
 
     // ---------- 틀 안에 불똥이가 있는지 ----------
@@ -309,10 +411,21 @@
         this.hopRate = 7 + Math.random() * 3;
         this.age = 0;
         this.turnIn = 1 + Math.random() * 2;
+        this.held = false;
+        this.swing = 0;
+        this.fallV = 0;
       }
 
       update(dt) {
         this.age += dt;
+        if (this.held) {
+          // 집혀 있는 동안: 손을 따라가며 대롱대롱
+          const tx = pinch.x + pinch.offX, ty = pinch.y + pinch.offY;
+          this.swing = (this.swing || 0) * 0.85 + (tx - this.x) * 0.004;
+          this.x = tx; this.y = ty;
+          this.hop += dt * 4;
+          return;
+        }
         this.turnIn -= dt;
         if (this.turnIn <= 0) {
           // 가끔 방향을 바꿔서 이리저리 돌아다니게
@@ -327,8 +440,14 @@
         const mx = this.w / 2, top = innerHeight * 0.25, bottom = innerHeight - 20;
         if (this.x < mx) { this.x = mx; this.vx = Math.abs(this.vx); }
         if (this.x > innerWidth - mx) { this.x = innerWidth - mx; this.vx = -Math.abs(this.vx); }
-        if (this.y < top) { this.y = top; this.vy = Math.abs(this.vy); }
+        if (this.y < top) {
+          // 높은 곳에서 놓으면 바닥 쪽으로 떨어짐
+          this.fallV = (this.fallV || 0) + 2500 * dt;
+          this.y = Math.min(top, this.y + this.fallV * dt);
+          if (this.y >= top) { this.fallV = 0; this.vy = Math.abs(this.vy); spark(this.x, this.y, 12); }
+        }
         if (this.y > bottom) { this.y = bottom; this.vy = -Math.abs(this.vy); }
+        this.swing = (this.swing || 0) * 0.9;
 
         const prev = Math.sin(this.hop);
         this.hop += this.hopRate * dt;
@@ -337,26 +456,30 @@
       }
 
       draw() {
-        const s = Math.abs(Math.sin(this.hop));
+        const s = this.held ? 0 : Math.abs(Math.sin(this.hop));
         const lift = s * this.h * 0.18;
-        const squash = 1 + (1 - s) * 0.08;
+        const squash = this.held ? 1 / (1 + Math.sin(this.hop) * 0.04) : 1 + (1 - s) * 0.08;
         // 등장: 틀 크기에서 뛰어다니는 크기로 줄어듦
         const t = Math.min(1, this.age / 0.6);
         const size = (this.h0 + (this.h - this.h0) * (1 - Math.pow(1 - t, 3))) / this.h;
 
-        // 그림자
-        ctx.save();
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
-        ctx.beginPath();
-        ctx.ellipse(this.x, this.y, this.w * 0.35 * (1 - s * 0.3), this.h * 0.05, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
+        // 그림자 (집혀 있을 땐 없음)
+        if (!this.held) {
+          ctx.save();
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+          ctx.beginPath();
+          ctx.ellipse(this.x, this.y, this.w * 0.35 * (1 - s * 0.3), this.h * 0.05, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
 
         // 불똥이는 정면을 보고 있으니 좌우 반전 대신 가는 방향으로 살짝 기울임
+        const grabbed = this.held ? 1.1 : 1;
+        const tilt = this.held ? -(this.swing || 0) : this.vx * 0.12 + Math.sin(this.hop * 2) * 0.05 - (this.swing || 0);
         ctx.save();
         ctx.translate(this.x, this.y - lift);
-        ctx.rotate(this.vx * 0.12 + Math.sin(this.hop * 2) * 0.05);
-        ctx.scale(size * squash, size / squash);
+        ctx.rotate(Math.max(-0.6, Math.min(0.6, tilt)));
+        ctx.scale(size * squash * grabbed, size / squash * grabbed);
         ctx.drawImage(this.img, -this.w / 2, -this.h, this.w, this.h);
         ctx.restore();
       }
@@ -494,8 +617,11 @@
       if (silhouette.complete && showUI) drawGuide(g);
       if (debug) drawDebug();
 
-      sprites.sort((a, b) => a.y - b.y);
+      updateHands(now, dt);
+      // 집고 있는 불똥이는 맨 앞에
+      sprites.sort((a, b) => (a.held - b.held) || (a.y - b.y));
       for (const s of sprites) { s.update(dt); s.draw(); }
+      drawPinchCursor();
 
       for (const p of particles) {
         p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 400 * dt; p.life -= dt * 1.6;
@@ -560,12 +686,13 @@
     }
 
     document.getElementById('btnCapture').onclick = () => capture();
-    document.getElementById('btnClear').onclick = () => { sprites = []; };
+    function clearSprites() { sprites = []; pinch.sprite = null; }
+    document.getElementById('btnClear').onclick = clearSprites;
     document.getElementById('btnClean').onclick = toggleUI;
     document.getElementById('btnFull').onclick = toggleFull;
     addEventListener('keydown', e => {
       if (e.code === 'Space') { e.preventDefault(); capture(); }
-      else if (e.key === 'c' || e.key === 'C') sprites = [];
+      else if (e.key === 'c' || e.key === 'C') clearSprites();
       else if (e.key === 'h' || e.key === 'H') toggleUI();
       else if (e.key === 'f' || e.key === 'F') toggleFull();
       else if (e.key === 'd' || e.key === 'D') debug = !debug;
