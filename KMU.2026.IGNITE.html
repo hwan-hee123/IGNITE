@@ -188,7 +188,9 @@
     const EMBER_RATE = 3.5;      // 불똥이 하나가 1초에 머리 위로 피워 올리는 불티 수
     const LAND_SPARKS = 5;       // 착지할 때 튀는 불꽃 수 (EMBER_SCALE 적용 전)
     const PARTICLE_MAX = 300;    // 화면 전체 불티·불꽃 최대 개수 (아이맥이 무거워지지 않게)
-    const THROW_SPEED = 1100;    // 손을 이보다 빠르게(px/초) 휙 놓으면 "던짐" → 화면 밖으로 날아감
+    const THROW_SPEED = 0.75;    // 놓기 직전 손 속도가 1초에 화면 높이의 이만큼보다 빠르면 "던짐" → 화면 밖으로 날아감
+    const THROW_WINDOW_MS = 200; // 던질 속도를 재는 구간 (손가락 벌리기 직전 이 시간 동안 가장 빨랐던 속도)
+    const THROW_BOOST = 1.3;     // 던진 속도에 곱하는 값 (손보다 조금 더 힘차게 날아가게)
     const THROW_GRAVITY = 1400;  // 던진 뒤 떨어지는 힘 (px/초²)
     const SMOKE_PUFFS = 9;       // 불이 꺼질 때 피어오르는 연기 덩어리 수
     const SMOKE_ALPHA = 0.32;    // 연기 진하기
@@ -230,12 +232,12 @@
     const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
     const PINCH_ON = 0.35;       // 엄지-검지 거리가 손 크기의 이 비율보다 가까우면 "집음"
-    const PINCH_OFF = 0.5;       // 이보다 멀어지면 "놓음" (중간은 이전 상태 유지 → 덜 끊김)
+    const PINCH_OFF = 0.6;       // 이보다 멀어지면 "놓음" (중간은 이전 상태 유지 → 덜 끊김)
     const GRAB_RADIUS = 0.6;     // 불똥이 키의 이 비율 안에서 집으면 잡힘
     const MAX_HANDS = 4;         // 동시에 인식하는 손 개수 (손마다 불똥이 하나씩 잡을 수 있음)
-    const HAND_LOST_MS = 450;    // 집고 있는 손을 이 시간 동안 놓쳐도 계속 들고 있음 (빠르게 움직일 때 끊김 방지)
+    const HAND_LOST_MS = 700;    // 집고 있는 손을 이 시간 동안 놓쳐도 계속 들고 있음 (빠르게 움직일 때 끊김 방지)
     const PINCH_COOLDOWN_MS = 1200; // 틀이 닫힌 뒤 핀치를 쉬는 시간 (피규어 든 손을 내리는 동작 무시)
-    const RELEASE_FRAMES = 3;    // 손가락이 연속으로 이만큼 벌어져 있어야 놓음 (흔들림에 잘못 놓치지 않게)
+    const RELEASE_FRAMES = 4;    // 손가락이 연속으로 이만큼 벌어져 있어야 놓음 (흔들림에 잘못 놓치지 않게)
     const HOLD_MATCH = 0.5;      // 집고 있는 손을 다음 프레임에서 찾을 때 허용 거리 (화면 높이 비율)
     const CURSOR_R = 18;         // 핀치 커서 크기 (손가락을 벌렸을 때)
     const CURSOR_R_PRESS = 9;    // 집었을 때 커서 크기
@@ -682,13 +684,37 @@
       p.x = nx; p.y = ny;
       p.lastT = t;
       p.gap = f.gap;
+      // 손가락 거리는 부드럽게 (빠르게 움직여 흐려질 때 한 프레임씩 튀는 값에 흔들리지 않게)
+      p.gapS = p.visible && p.gapS != null ? p.gapS * 0.55 + f.gap * 0.45 : f.gap;
       p.visible = true;
+      // 던질 속도 계산용: 최근 손 위치 기록 (원본 위치)
+      (p.hist || (p.hist = [])).push({ t, x: f.x, y: f.y });
+      while (p.hist.length && t - p.hist[0].t > 400) p.hist.shift();
       if (!p.down && f.gap < PINCH_ON) pinchStart(p);
       else if (p.down) {
-        // 흔들려서 손가락 거리가 한두 번 튀어도 놓지 않게: 연속으로 벌어져 있어야 놓음
-        p.openCount = f.gap > PINCH_OFF ? (p.openCount || 0) + 1 : 0;
+        // 흔들려서 손가락 거리가 몇 번 튀어도 놓지 않게: 부드럽게 한 값이 연속으로 벌어져 있어야 놓음
+        if (p.gapS > PINCH_OFF) {
+          if (!p.openCount) p.openStartT = t;   // 손가락을 벌리기 시작한 순간 (던질 속도는 이 직전 기준)
+          p.openCount = (p.openCount || 0) + 1;
+        } else p.openCount = 0;
         if (p.openCount >= RELEASE_FRAMES) { p.openCount = 0; pinchEnd(p); }
       }
+    }
+
+    // 던질 속도: 손가락을 벌리기 직전 THROW_WINDOW_MS 동안 가장 빨랐던 손 속도 (놓는 순간엔 손이 이미 멈추는 중이라)
+    function throwVelocity(p) {
+      const end = p.openStartT || p.lastT;
+      const pts = (p.hist || []).filter(h => h.t <= end + 20 && h.t >= end - THROW_WINDOW_MS);
+      let best = { vx: p.vx, vy: p.vy, sp: Math.hypot(p.vx, p.vy) };
+      for (let i = 1; i < pts.length; i++) {
+        for (let j = Math.max(0, i - 3); j < i; j++) {   // 1~3프레임 간격으로 재서 흔들림에 덜 민감하게
+          const dt = (pts[i].t - pts[j].t) / 1000;
+          if (dt < 0.02) continue;
+          const vx = (pts[i].x - pts[j].x) / dt, vy = (pts[i].y - pts[j].y) / dt, sp = Math.hypot(vx, vy);
+          if (sp > best.sp) best = { vx, vy, sp };
+        }
+      }
+      return best;
     }
 
     // 손가락 사이에서 가장 가까운, 아무도 안 잡은 불똥이
@@ -719,15 +745,17 @@
       const s = p.sprite;
       if (!s) return;
       s.holder = null;
-      const sp = Math.hypot(p.vx, p.vy);
-      if (sp > THROW_SPEED) {
-        // 세게 던지면: 그 속도 그대로 포물선을 그리며 날아가 화면 밖에서 불이 꺼짐
+      const v = throwVelocity(p);
+      p.openStartT = 0;
+      p.hist = [];
+      if (v.sp > innerHeight * THROW_SPEED) {
+        // 세게 던지면: 그 속도(조금 더 힘껏) 그대로 포물선을 그리며 날아가 화면 밖에서 불이 꺼짐
         s.thrown = true;
-        s.tvx = p.vx; s.tvy = p.vy;
-        s.spinV = Math.max(-8, Math.min(8, p.vx * 0.004));
-      } else if (sp > 200) {
+        s.tvx = v.vx * THROW_BOOST; s.tvy = v.vy * THROW_BOOST;
+        s.spinV = Math.max(-8, Math.min(8, v.vx * 0.004));
+      } else if (v.sp > innerHeight * 0.15) {
         // 살짝 던지면: 그 방향으로 달려감
-        s.vx = p.vx / sp; s.vy = p.vy / sp; s.turnIn = 1.5;
+        s.vx = v.vx / v.sp; s.vy = v.vy / v.sp; s.turnIn = 1.5;
       }
       s.fallV = 0;
       p.sprite = null;
