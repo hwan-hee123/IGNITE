@@ -186,8 +186,13 @@
     const SHADOW_ALPHA = 0.32;   // 발밑 그림자 진하기
     const EMBER_SCALE = 0.8;     // 튀는 불꽃 개수 비율 (줄이면 더 차분)
     const EMBER_RATE = 3.5;      // 불똥이 하나가 1초에 머리 위로 피워 올리는 불티 수
-    const LAND_SPARKS = 5;       // 착지할 때 튀는 불꽃 수 (EMBER_SCALE 적용 전)
-    const PARTICLE_MAX = 300;    // 화면 전체 불티·불꽃 최대 개수 (아이맥이 무거워지지 않게)
+    const LAND_SPARKS = 8;       // 착지할 때 튀는 불꽃 수 (EMBER_SCALE 적용 전)
+    const FOOT_SPARKS = 2;       // 뛰어다닐 때 발밑에서 한 번에 튀는 불꽃 수
+    const FOOT_SPARK_S = 0.09;   // 발밑 불꽃이 튀는 간격 (초)
+    const BURST_SPARKS = 34;     // 던져서 터질 때 불꽃 수
+    const BURST_EMBERS = 10;     // 터진 뒤 떠오르는 불티 수
+    const BURST_BLOOM = 0.22;    // 터질 때 빛이 퍼지는 크기 (화면 긴 변 비율)
+    const PARTICLE_MAX = 400;    // 화면 전체 불티·불꽃 최대 개수 (아이맥이 무거워지지 않게)
     const THROW_SPEED = 0.75;    // 놓기 직전 손 속도가 1초에 화면 높이의 이만큼보다 빠르면 "던짐" → 화면 밖으로 날아감
     const THROW_WINDOW_MS = 200; // 던질 속도를 재는 구간 (손가락 벌리기 직전 이 시간 동안 가장 빨랐던 속도)
     const THROW_BOOST = 1.3;     // 던진 속도에 곱하는 값 (손보다 조금 더 힘차게 날아가게)
@@ -1042,6 +1047,12 @@
         this.hop += this.hopRate * dt;
         // 착지할 때마다 불똥 튀기기
         if (go && prev > 0 && Math.sin(this.hop) <= 0) { puff(this.x, this.y, this.w); spark(this.x, this.y - 4, LAND_SPARKS); }
+        // 발이 바닥 가까이 있을 때 달리는 방향 반대쪽으로 작은 불꽃이 바닥을 스침
+        this.footT = (this.footT ?? 0) - dt;
+        if (go && Math.abs(Math.sin(this.hop)) < 0.35 && this.footT <= 0) {
+          this.footT = FOOT_SPARK_S * (0.6 + Math.random() * 0.8);
+          footSpark(this.x + (Math.random() - 0.5) * this.w * 0.4, this.y, Math.sign(this.vx) || 1);
+        }
       }
 
       get held() { return !!this.holder; }
@@ -1146,19 +1157,44 @@
     }
 
     // 불꽃 튐: 짧은 빛줄기가 사방으로 탁 튀고 중력에 떨어지며 꺼짐 (착지, 튀어나올 때, 집을 때)
-    function spark(x, y, count) {
+    function spark(x, y, count, o = {}) {
       if (reduceMotion) return;
       const n = Math.round(count * EMBER_SCALE);
+      const center = o.angle ?? -Math.PI / 2, spread = o.spread ?? 2.6;
+      const vMin = o.vMin ?? 120, vMax = o.vMax ?? 300;
       for (let i = 0; i < n && particles.length < PARTICLE_MAX; i++) {
-        const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.6;
-        const v = 120 + Math.random() * 180;
-        particles.push({ kind: 'spark', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, dur: 0.35 + Math.random() * 0.25 });
+        const a = center + (Math.random() - 0.5) * spread;
+        const v = vMin + Math.random() * (vMax - vMin);
+        particles.push({
+          kind: 'spark', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1,
+          dur: (o.dur ?? 0.35) + Math.random() * 0.25, lw: o.lw ?? 1.6
+        });
       }
+    }
+
+    // 뛰어다닐 때 발밑: 가는 방향 반대쪽으로 작은 불꽃이 바닥을 스치듯 낮게 튐
+    function footSpark(x, y, dir) {
+      spark(x - dir * 6, y - 2, FOOT_SPARKS, {
+        angle: dir > 0 ? Math.PI + 0.35 : -0.35, spread: 0.7,
+        vMin: 90, vMax: 230, dur: 0.22, lw: 1.2
+      });
+    }
+
+    // 던져서 화면 밖에서 터질 때: 그 자리에서 빛이 확 퍼지고, 불꽃이 사방으로 길게 터지고, 연기·불티가 피어오름
+    function burst(x, y, ix, iy, w) {
+      if (reduceMotion) return;
+      particles.push({ kind: 'bloom', x, y, r: Math.max(innerWidth, innerHeight) * BURST_BLOOM, life: 1, dur: 0.55 });
+      const inward = Math.atan2(iy || -0.3, ix || 0);   // 화면 안쪽으로 더 많이
+      spark(x, y, BURST_SPARKS, { angle: inward, spread: Math.PI * 1.6, vMin: 250, vMax: 650, dur: 0.5, lw: 2.2 });
+      spark(x, y, BURST_SPARKS * 0.5, { angle: inward, spread: Math.PI * 2, vMin: 80, vMax: 220, dur: 0.6, lw: 1.4 });
+      for (let i = 0; i < BURST_EMBERS; i++) ember(x + (Math.random() - 0.5) * w * 0.6, y + (Math.random() - 0.5) * w * 0.4);
+      smoke(x, y, w * 1.5, ix, iy, SMOKE_PUFFS * 2);
     }
 
     function updateParticles(dt) {
       for (const p of particles) {
         if (p.kind === 'puff') { p.life -= dt / 0.45; continue; }
+        if (p.kind === 'bloom') { p.life -= dt / p.dur; continue; }
         if (p.kind === 'smoke') {
           if (p.delay > 0) { p.delay -= dt; continue; }
           p.x += p.vx * dt; p.y += p.vy * dt;
@@ -1189,8 +1225,7 @@
       // 화면 안쪽 방향 (연기가 가장자리에서 안으로 살짝 밀려 들어오게)
       const ix = s.x < 0 ? 1 : s.x > innerWidth ? -1 : 0;
       const iy = s.y - s.h / 2 < 0 ? 1 : s.y - s.h / 2 > innerHeight ? -1 : 0;
-      spark(ex, ey, 6);   // 꺼지기 직전 마지막 불꽃
-      smoke(ex, ey, s.w, ix, iy, SMOKE_PUFFS);
+      burst(ex, ey, ix, iy, s.w);
     }
 
     // 연기 피우기: (ix, iy) 쪽으로 살짝 밀려나며 위로 피어오름
@@ -1248,6 +1283,21 @@
       ctx.lineCap = 'round';
       for (const p of particles) {
         if (p.kind === 'puff' || p.kind === 'smoke') continue;
+        if (p.kind === 'bloom') {
+          // 터지는 빛: 그 자리에서 빠르게 커지며 옅어짐 (화면 전체가 번쩍이지 않게 그 자리만)
+          const e = 1 - Math.pow(p.life, 2), r = p.r * (0.35 + 0.65 * e), a = Math.pow(p.life, 1.5) * 0.85;
+          const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+          g.addColorStop(0, `rgba(255, 236, 200, ${a})`);
+          g.addColorStop(0.25, `rgba(255, 150, 70, ${a * 0.7})`);
+          g.addColorStop(0.6, `rgba(254, 54, 54, ${a * 0.3})`);
+          g.addColorStop(1, 'rgba(254, 54, 54, 0)');
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+          ctx.fill();
+          continue;
+        }
         const t = p.life, a = Math.min(1, t * 1.6) * (p.kind === 'ember' ? 0.9 : 1);
         // 불티는 꺼지기 직전 살짝 깜빡임
         const flick = p.kind === 'ember' && t < 0.35 ? 0.6 + 0.4 * Math.sin(p.wob * 3) : 1;
@@ -1256,7 +1306,7 @@
         if (p.kind === 'spark') {
           // 움직이는 방향으로 짧은 빛줄기
           ctx.strokeStyle = fireColor(t, a);
-          ctx.lineWidth = 1.6;
+          ctx.lineWidth = p.lw || 1.6;
           ctx.beginPath();
           ctx.moveTo(p.x, p.y);
           ctx.lineTo(p.x - p.vx * 0.035, p.y - p.vy * 0.035);
