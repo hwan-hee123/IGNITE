@@ -195,11 +195,11 @@
     const LAND_SPARKS = 8;       // 착지할 때 튀는 불꽃 수 (EMBER_SCALE 적용 전)
     const FOOT_SPARKS = 2;       // 뛰어다닐 때 발밑에서 한 번에 튀는 불꽃 수
     const FOOT_SPARK_S = 0.09;   // 발밑 불꽃이 튀는 간격 (초)
-    const BURST_SPARKS = 34;     // 던져서 터질 때 불꽃 수
+    const FIREWORK_SPARKS = 56;  // 폭죽 한 번에 큰 링 불꽃 수 (안쪽 링·흩어지는 불꽃은 이 비율로)
     const BURST_EMBERS = 10;     // 터진 뒤 떠오르는 불티 수
     const BURST_BLOOM = 0.22;    // 터질 때 빛이 퍼지는 크기 (화면 긴 변 비율)
     const BURST_SCALE = 1.5;     // 터짐 세기 배율 (빛·불꽃 수·속도·굵기·연기를 한꺼번에 키움)
-    const PARTICLE_MAX = 500;    // 화면 전체 불티·불꽃 최대 개수 (아이맥이 무거워지지 않게)
+    const PARTICLE_MAX = 700;    // 화면 전체 불티·불꽃 최대 개수 (아이맥이 무거워지지 않게)
     const THROW_SPEED = 0.75;    // 놓기 직전 손 속도가 1초에 화면 높이의 이만큼보다 빠르면 "던짐" → 화면 밖으로 날아감
     const THROW_WINDOW_MS = 200; // 던질 속도를 재는 구간 (손가락 벌리기 직전 이 시간 동안 가장 빨랐던 속도)
     const THROW_BOOST = 1.3;     // 던진 속도에 곱하는 값 (손보다 조금 더 힘차게 날아가게)
@@ -1002,9 +1002,15 @@
         const bin = bins[Math.floor(h / 30) % 12], w = s;
         bin.w += w; bin.r += d[i] * w; bin.g += d[i + 1] * w; bin.b += d[i + 2] * w;
       }
-      const vivid = (r, gg, b) => {   // 폭죽용으로 밝고 선명하게
-        const mx = Math.max(r, gg, b, 1), k = 255 / mx;
-        return [Math.round(Math.min(255, r * k * 0.95 + 20)), Math.round(Math.min(255, gg * k * 0.95 + 20)), Math.round(Math.min(255, b * k * 0.95 + 20))];
+      // 폭죽용으로 밝고 선명하게: 색상(hue)은 그대로, 채도는 높이고 밝기는 잘 보이는 정도로 맞춤
+      //  (카메라로 찍으면 색이 바래 보여서 그대로 쓰면 폭죽이 하얗게 보임)
+      const vivid = (r, gg, b) => {
+        r /= 255; gg /= 255; b /= 255;
+        const mx = Math.max(r, gg, b), mn = Math.min(r, gg, b), dd = mx - mn || 1e-6;
+        const h = mx === r ? ((gg - b) / dd + 6) % 6 : mx === gg ? (b - r) / dd + 2 : (r - gg) / dd + 4;
+        const S = 1, L = 0.58, c = (1 - Math.abs(2 * L - 1)) * S, x = c * (1 - Math.abs(h % 2 - 1)), m = L - c / 2;
+        const [r1, g1, b1] = h < 1 ? [c, x, 0] : h < 2 ? [x, c, 0] : h < 3 ? [0, c, x] : h < 4 ? [0, x, c] : h < 5 ? [x, 0, c] : [c, 0, x];
+        return [r1, g1, b1].map(v => Math.round((v + m) * 255));
       };
       const cols = bins.filter(b => b.w > 0.02 * total).sort((a, b) => b.w - a.w).slice(0, 3)
         .map(b => vivid(b.r / b.w, b.g / b.w, b.b / b.w));
@@ -1239,7 +1245,7 @@
     // 폭죽 불꽃 색: 막 터질 땐 하얗게 → 금방 불똥이 색으로
     function particleColor(p, t, a) {
       if (!p.col) return fireColor(t, a);
-      const k = Math.min(1, (1 - t) * 2.5), [r, g, b] = p.col;
+      const k = Math.min(1, (1 - t) * 8), [r, g, b] = p.col;   // 터지는 순간만 하얗고 바로 자기 색
       return `rgba(${Math.round(255 + (r - 255) * k)}, ${Math.round(255 + (g - 255) * k)}, ${Math.round(255 + (b - 255) * k)}, ${a})`;
     }
 
@@ -1291,7 +1297,8 @@
         const v = vMin + Math.random() * (vMax - vMin);
         particles.push({
           kind: 'spark', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1,
-          dur: (o.dur ?? 0.35) + Math.random() * 0.25, lw: o.lw ?? 1.6, col: pickColor(o.palette)
+          dur: (o.dur ?? 0.35) + Math.random() * 0.25, lw: o.lw ?? 1.6, col: o.col || pickColor(o.palette),
+          drag: o.drag, grav: o.grav, trail: o.trail, delay: o.delay
         });
       }
     }
@@ -1302,8 +1309,12 @@
       if (reduceMotion) return;
       const k = BURST_SCALE;
       particles.push({ kind: 'bloom', x, y, r: Math.max(innerWidth, innerHeight) * BURST_BLOOM * k, life: 1, dur: 0.55 + 0.15 * (k - 1), col: palette[0] });
-      spark(x, y, BURST_SPARKS * k, { angle, spread, ring: true, vMin: 420 * k, vMax: 560 * k, dur: 0.65, lw: 2.2 * k, palette });
-      spark(x, y, BURST_SPARKS * 0.6 * k, { angle, spread, vMin: 120 * k, vMax: 380 * k, dur: 0.7, lw: 1.4 * k, palette });
+      const shell = { angle, spread, ring: true, drag: 2.2, grav: 180, trail: 0.07, palette };
+      // 큰 링 → 조금 늦게 안쪽 링(다른 색) → 사이사이 흩어지는 불꽃 → 마지막에 작게 타닥타닥
+      spark(x, y, FIREWORK_SPARKS * k, { ...shell, vMin: 640 * k, vMax: 760 * k, dur: 1.0, lw: 2.6 * k });
+      spark(x, y, FIREWORK_SPARKS * 0.6 * k, { ...shell, col: palette[1 % palette.length], vMin: 330 * k, vMax: 420 * k, dur: 0.9, lw: 2.2 * k, delay: 0.1 });
+      spark(x, y, FIREWORK_SPARKS * 0.5 * k, { angle, spread, drag: 2, grav: 260, trail: 0.05, palette, vMin: 120 * k, vMax: 560 * k, dur: 0.9, lw: 1.6 * k });
+      spark(x, y, FIREWORK_SPARKS * 0.4 * k, { angle, spread, drag: 3, grav: 120, trail: 0.02, palette, vMin: 250 * k, vMax: 650 * k, dur: 0.5, lw: 1.2 * k, delay: 0.35 });
       for (let i = 0; i < BURST_EMBERS * k; i++) {
         const a = angle + (Math.random() - 0.5) * spread, r = w * (0.3 + Math.random() * 0.9) * k;
         ember(x + Math.cos(a) * r, y + Math.sin(a) * r, pickColor(palette));
@@ -1337,6 +1348,7 @@
           p.life -= dt / p.dur;
           continue;
         }
+        if (p.delay > 0) { p.delay -= dt; continue; }
         if (p.kind === 'ember') {
           p.wob += dt * 5;
           p.x += (p.vx + Math.sin(p.wob) * 18) * dt;   // 아지랑이처럼 좌우로 흔들
@@ -1344,7 +1356,8 @@
           p.vy *= 1 - dt * 0.6;
         } else {
           p.x += p.vx * dt; p.y += p.vy * dt;
-          p.vx *= 1 - dt * 1.5; p.vy += 520 * dt;      // 공기 저항 + 중력
+          const drag = 1 - dt * (p.drag ?? 1.5);
+          p.vx *= drag; p.vy = p.vy * drag + (p.grav ?? 520) * dt;   // 공기 저항 + 중력
         }
         p.life -= dt / p.dur;
       }
@@ -1429,27 +1442,35 @@
           ctx.fill();
           continue;
         }
+        if (p.delay > 0) continue;
         const t = p.life, a = Math.min(1, t * 1.6) * (p.kind === 'ember' ? 0.9 : 1);
         // 불티는 꺼지기 직전 살짝 깜빡임
-        const flick = p.kind === 'ember' && t < 0.35 ? 0.6 + 0.4 * Math.sin(p.wob * 3) : 1;
+        //  폭죽 불꽃은 끝무렵 반짝반짝
+        const flick = p.kind === 'ember' && t < 0.35 ? 0.6 + 0.4 * Math.sin(p.wob * 3)
+          : p.col && p.kind === 'spark' && t < 0.4 ? 0.45 + 0.55 * Math.abs(Math.sin(p.life * 60 + p.x)) : 1;
         // 은은한 빛 (미리 그려둔 빛 그림을 깔아줌 — 예전 그림자 흐림과 같은 느낌)
-        const halo = p.kind === 'spark' ? 9 + (p.lw || 1.6) * 2 : 9 + p.r * 2;
+        const halo = (p.kind === 'spark' ? 9 + (p.lw || 1.6) * 2 : 9 + p.r * 2) * (p.col ? 1.6 : 1);
         ctx.globalAlpha = a * 0.8 * flick;
         ctx.drawImage(p.col ? colorGlowSprite(p.col) : glowSprite(t), p.x - halo, p.y - halo, halo * 2, halo * 2);
         ctx.globalAlpha = 1;
+        // 색 있는 폭죽은 빛을 더하지 않고 그대로 칠함 (겹쳐도 하얗게 날아가지 않고 제 색이 보임)
+        ctx.globalCompositeOperation = p.col ? 'source-over' : 'lighter';
         if (p.kind === 'spark') {
-          // 움직이는 방향으로 짧은 빛줄기
-          ctx.strokeStyle = particleColor(p, t, a);
+          // 움직이는 방향으로 빛줄기 (폭죽은 더 길게)
+          const tr = p.trail || 0.035;
+          ctx.strokeStyle = particleColor(p, t, a * flick);
           ctx.lineWidth = p.lw || 1.6;
           ctx.beginPath();
           ctx.moveTo(p.x, p.y);
-          ctx.lineTo(p.x - p.vx * 0.035, p.y - p.vy * 0.035);
+          ctx.lineTo(p.x - p.vx * tr, p.y - p.vy * tr);
           ctx.stroke();
+          ctx.globalCompositeOperation = 'lighter';
         } else {
           ctx.fillStyle = particleColor(p, t, a * flick);
           ctx.beginPath();
           ctx.arc(p.x, p.y, p.r * (0.5 + 0.5 * t), 0, Math.PI * 2);
           ctx.fill();
+          ctx.globalCompositeOperation = 'lighter';
         }
       }
       ctx.restore();
