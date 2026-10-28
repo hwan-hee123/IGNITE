@@ -233,6 +233,7 @@
     const GRAB_RADIUS = 0.6;     // 불똥이 키의 이 비율 안에서 집으면 잡힘
     const MAX_HANDS = 4;         // 동시에 인식하는 손 개수 (손마다 불똥이 하나씩 잡을 수 있음)
     const HAND_LOST_MS = 450;    // 집고 있는 손을 이 시간 동안 놓쳐도 계속 들고 있음 (빠르게 움직일 때 끊김 방지)
+    const PINCH_COOLDOWN_MS = 1200; // 틀이 닫힌 뒤 핀치를 쉬는 시간 (피규어 든 손을 내리는 동작 무시)
     const RELEASE_FRAMES = 3;    // 손가락이 연속으로 이만큼 벌어져 있어야 놓음 (흔들림에 잘못 놓치지 않게)
     const HOLD_MATCH = 0.5;      // 집고 있는 손을 다음 프레임에서 찾을 때 허용 거리 (화면 높이 비율)
     const CURSOR_R = 18;         // 핀치 커서 크기 (손가락을 벌렸을 때)
@@ -618,7 +619,9 @@
     function updateHands(now, dt) {
       // 불똥이 스캔 중(틀이 떠 있을 때)엔 손 제스처를 끔: 불똥이를 든 손이 커서로 잡히지 않게
       // (HIG: 한 화면에서 서로 부딪히는 동작을 섞지 않기) — 잡고 있던 불똥이는 놓고, 커서는 부드럽게 사라짐
-      if (guideOn) {
+      // 틀이 닫힌 직후 PINCH_COOLDOWN_MS 동안도 쉼: 불똥이 피규어를 든 손을 내리는 동작이
+      // 화면 속 불똥이를 집어 던지는 걸로 잘못 인식되지 않게
+      if (guideOn || performance.now() - guideClosedAt < PINCH_COOLDOWN_MS) {
         for (const p of pinches) { if (p.down) pinchEnd(p); p.visible = false; }
         return;
       }
@@ -691,7 +694,8 @@
     function grabbable(p) {
       let best = null, bestD = Infinity;
       for (const s of sprites) {
-        if (s.holder || s.thrown) continue;   // 이미 잡혔거나 날아가는 중이면 못 잡음
+        if (s.holder || s.thrown || s.fadeT != null) continue;   // 이미 잡혔거나, 날아가거나, 꺼지는 중이면 못 잡음
+        if (s.age < s.liftTime() + ENTER_SHRINK_S) continue;      // 막 튀어나오는 중이면 못 잡음
         const d = Math.hypot(p.x - s.x, p.y - (s.y - s.h * 0.5));
         if (d < s.h * GRAB_RADIUS && d < bestD) { best = s; bestD = d; }
       }
@@ -864,7 +868,9 @@
 
     // Space: 틀 띄우기 / 숨기기 (틀이 떠 있을 때만 인식)
     let lastSeenAt = 0;   // 틀을 띄운 시각 또는 마지막으로 불똥이가 인식된 시각 (자동 닫기 기준)
+    let guideClosedAt = -1e9;   // 틀이 마지막으로 닫힌 시각 (닫힌 직후엔 핀치를 잠깐 쉼)
     function setGuide(on) {
+      if (guideOn && !on) guideClosedAt = performance.now();
       guideOn = on;
       readyAt = 0;
       lastSeenAt = performance.now();
