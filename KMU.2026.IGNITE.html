@@ -37,7 +37,8 @@
 
     /* Liquid Glass (regular) */
     .glass {
-      position: fixed; left: 50%; transform: translateX(-50%);
+      /* 가운데 정렬은 좌우 여백 auto로 (transform으로 하면 폭이 바뀔 때 좌우로 흔들림) */
+      position: fixed; left: 0; right: 0; margin-inline: auto; width: fit-content;
       border-radius: 999px;
       background: rgba(30, 30, 32, 0.32);
       -webkit-backdrop-filter: blur(22px) saturate(180%) brightness(1.04);
@@ -47,7 +48,7 @@
         inset 0 -1px 0.5px rgba(255, 255, 255, 0.12),    /* 아래쪽 가장자리 */
         inset 0 0 0 0.5px rgba(255, 255, 255, 0.22),     /* 유리 테두리 */
         0 10px 30px rgba(0, 0, 0, 0.28);                  /* 떠 있는 그림자 */
-      transition: opacity 0.35s ease, transform 0.45s cubic-bezier(0.2, 1.2, 0.3, 1);
+      transition: opacity 0.35s ease, transform 0.45s cubic-bezier(0.2, 0.9, 0.3, 1), width 0.35s cubic-bezier(0.2, 0.9, 0.3, 1);
     }
     .glass::before {                 /* 표면 반사광 */
       content: ''; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
@@ -99,19 +100,19 @@
       #ui button { padding: 0 12px; }
     }
 
-    body.clean .glass { opacity: 0; pointer-events: none; transform: translateX(-50%) scale(0.92); }
+    body.clean .glass { opacity: 0; pointer-events: none; transform: scale(0.92); }
 
     /* 스캔 중 안내 문구: Face ID 설정 화면처럼 틀 아래 크고 짧게 (위쪽 작은 캡슐은 숨김) */
     #caption {
-      position: fixed; left: 50%; transform: translate(-50%, 6px);
+      position: fixed; left: 0; right: 0; margin-inline: auto; width: fit-content; transform: translateY(6px);
       max-width: calc(100vw - 32px); text-align: center; pointer-events: none;
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Apple SD Gothic Neo", "Pretendard Variable", Pretendard, "Malgun Gothic", sans-serif;
       font-size: 20px; font-weight: 600; letter-spacing: -0.01em;   /* HIG Title 3 크기 */
       color: rgba(255, 255, 255, 0.96); text-shadow: 0 1px 12px rgba(0, 0, 0, 0.35);
       opacity: 0; transition: opacity 0.35s ease, transform 0.45s cubic-bezier(0.2, 1, 0.3, 1);
     }
-    body.scanning #caption { opacity: 1; transform: translate(-50%, 0); }
-    body.scanning #status { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+    body.scanning #caption { opacity: 1; transform: none; }
+    body.scanning #status { opacity: 0; transform: translateY(-6px); }
     @media (prefers-reduced-motion: reduce) { #caption { transition: none; } }
     .t { display: inline-block; }   /* 글자 바뀔 때 살짝 위아래로 움직이는 전환용 */
 
@@ -251,7 +252,20 @@
       el._anim = span.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-3px)' }],
         { duration: 120, easing: 'ease-in', fill: 'forwards' });
       el._anim.finished.then(() => {
+        // 유리 캡슐은 글자 길이가 바뀌어도 폭이 툭 바뀌지 않고 부드럽게 늘었다 줄어듦
+        const glass = el.classList.contains('glass');
+        const from = glass ? el.offsetWidth : 0;
         span.textContent = el._target;
+        if (glass) {
+          const to = el.offsetWidth;
+          if (Math.abs(to - from) > 1) {
+            el.style.width = from + 'px';
+            el.offsetWidth;   // 시작 폭을 먼저 적용
+            el.style.width = to + 'px';
+            const end = e => { if (e.propertyName === 'width') { el.style.width = ''; el.removeEventListener('transitionend', end); } };
+            el.addEventListener('transitionend', end);
+          }
+        }
         el._anim.cancel();
         el._anim = null;
         span.animate([{ opacity: 0, transform: 'translateY(3px)' }, { opacity: 1, transform: 'none' }],
