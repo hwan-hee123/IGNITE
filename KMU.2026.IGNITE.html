@@ -227,6 +227,11 @@
     const TEXT_MIN_MS = 1200;    // 한 문구를 최소 이만큼은 보여줌 (문구가 빠르게 왔다 갔다 하지 않게)
     const AUTO_CLOSE_FADE_MS = 1000; // 닫히기 전 윤곽선이 옅어지는 시간
     const TURN_THRESHOLD = 0.2;  // 좌우 속도가 이보다 커야 돌아섬 (작은 흔들림엔 그대로)
+    const SPECIAL_FIREWORK = 0.12; // 폭죽이 하트·별 모양으로 터질 확률 (드물게)
+    const SHAPE_R = 0.24;        // 하트·별 폭죽 크기 (화면 짧은 변 비율)
+    const HAND_REACT_R = 0.28;   // 손이 이만큼(화면 높이 비율) 가까이 오면 불똥이가 반응
+    const HAND_FLEE_BOOST = 2.2; // 겁 많은 불똥이가 손에서 도망칠 때 빨라지는 배율
+    const IDLE_S = 8;            // 손도 틀도 없이 이만큼(초) 지나면 불똥이들이 쉬기 시작 (졸거나 서로 쳐다봄)
     const LIFT_SCALE = 0.08;     // 떠오를 때 커지는 비율
     const LIFT_RAISE = 0.04;     // 떠오를 때 올라가는 높이 (틀 키 비율)
     const BLINK_MS = 140;        // 셔터처럼 살짝 어두워지는 시간
@@ -348,6 +353,8 @@
     }));
     let sprites = [];
     let particles = [];
+    let lastActive = 0;          // 마지막으로 손이 보였거나 틀이 떠 있던 시각
+    let idleAll = false;         // 한동안 아무도 없음 → 불똥이들이 쉼
     let showUI = true;
     let debug = false;
     let lastInfo = null;         // 디버그용 { mask, cover, spill }
@@ -1041,6 +1048,13 @@
         // 바라보는 방향: 1 = 원래 모습(오른쪽으로 갈 때), -1 = 좌우 반전(왼쪽으로 갈 때)
         this.faceTarget = this.vx < 0 ? -1 : 1;
         this.face = this.faceTarget;
+        this.handMood = Math.random() < 0.5 ? -1 : 1;   // 손이 다가오면: -1 도망 / 1 반겨서 다가감 (마리마다 랜덤)
+        this.go = 1;             // 걷는 빠르기 배율 (쉬면 0, 도망치면 커짐)
+        this.amp = 1;            // 깡충 높이 배율
+        this.rest = null;        // 쉬는 중: 'doze' 졸기 / 'look' 옆 불똥이 쳐다보기
+        this.restIn = null;      // 쉬기 시작할 때까지 남은 시간 (마리마다 달라서 차례로 쉼)
+        this.nod = 0;            // 조는 정도 (0~1, 부드럽게)
+        this.wake = 0;           // 깨어날 때 깜짝 뛰기 (1 → 0)
       }
 
       // 그 자리에서 사라지기 (delay초 뒤 시작)
@@ -1101,6 +1115,51 @@
           this.hop += dt * 4;
           return;
         }
+        // 손 반응: 가까이 온 손 쪽으로 다가가거나(반가워함) 반대로 도망 (잡을 수 있는 위치면 천천히 → 잡기 쉽게)
+        const settled = this.age >= this.liftTime() + ENTER_SHRINK_S;
+        let goT = 1, handNear = null, best = HAND_REACT_R * innerHeight;
+        const cy = this.y - this.h * 0.5;
+        if (settled) for (const p of pinches) {
+          if (!p.visible || p.sprite) continue;
+          const d = Math.hypot(p.x - this.x, p.y - cy);
+          if (d < best) { best = d; handNear = p; }
+        }
+        if (handNear) {
+          const dx = handNear.x - this.x, dy = handNear.y - cy, d = Math.hypot(dx, dy) || 1;
+          if (this.hovered) goT = 0.3;
+          else if (this.handMood < 0) { this.vx = -dx / d; this.vy = -dy / d; goT = HAND_FLEE_BOOST; }
+          else { this.vx = dx / d; this.vy = dy / d; goT = d < this.w ? 0.2 : 1.3; }   // 손 바로 앞에선 멈춰서 기다림
+          this.turnIn = Math.max(this.turnIn, 0.4);
+        }
+        // 한동안 아무도 없으면 차례로 쉼 (졸거나 옆 불똥이 쳐다보기) → 손이나 틀이 나타나면 깜짝 깨어남
+        if (idleAll && !handNear && settled) {
+          if (!this.rest) {
+            this.restIn = (this.restIn ?? Math.random() * 4) - dt;
+            if (this.restIn <= 0) this.rest = Math.random() < 0.5 ? 'doze' : 'look';
+          }
+        } else {
+          if (this.rest) this.wake = 1 + Math.random() * 0.4;   // 1 넘는 만큼은 기다렸다 (한꺼번에 말고 차례로)
+          this.rest = null; this.restIn = null;
+        }
+        if (this.rest === 'look') {
+          // 가장 가까운 불똥이 쪽을 바라봄 (혼자면 그냥 졸기)
+          let near = null, nd = Infinity;
+          for (const o of sprites) {
+            if (o === this || o.thrown || o.fadeT != null) continue;
+            const d = Math.abs(o.x - this.x) + Math.abs(o.y - this.y);
+            if (d < nd) { nd = d; near = o; }
+          }
+          if (near) this.faceTarget = near.x < this.x ? -1 : 1;
+          else this.rest = 'doze';
+        }
+        if (this.rest) goT = 0;
+        const ease = reduceMotion ? 1 : Math.min(1, dt * (goT > this.go ? 4 : 2.5));
+        this.go += (goT - this.go) * ease;
+        const ampT = this.rest === 'doze' ? 0 : this.rest === 'look' ? 0.25 : 1;
+        this.amp += (ampT - this.amp) * ease;
+        this.nod += ((this.rest === 'doze' ? 1 : 0) - this.nod) * (reduceMotion ? 1 : Math.min(1, dt * 1.5));
+        if (this.wake > 0) this.wake = Math.max(0, this.wake - dt / 0.45);
+
         this.turnIn -= dt;
         if (this.turnIn <= 0) {
           // 가끔 방향을 바꿔서 이리저리 돌아다니게
@@ -1112,7 +1171,7 @@
         const lifted = this.age >= this.liftTime();
         if (lifted && !this.burst) { this.burst = true; spark(this.x, this.y - this.h0 * 0.5, 24); }
         if (this.age < this.liftTime() + (reduceMotion ? 0 : ENTER_SHRINK_S)) return;
-        const go = 1;
+        const go = this.go;
         this.x += this.vx * this.speed * dt * go;
         this.y += this.vy * this.speed * dt * go * 0.6;
 
@@ -1129,18 +1188,20 @@
         this.swing = (this.swing || 0) * 0.9;
 
         // 가는 방향이 확실히 바뀌었을 때만 돌아섬 (위아래로만 갈 땐 그대로 → 덜 깜빡임)
-        if (this.vx > TURN_THRESHOLD) this.faceTarget = 1;
+        if (this.rest) { /* 쉬는 중엔 방향 그대로 (쳐다보기는 위에서 정함) */ }
+        else if (this.vx > TURN_THRESHOLD) this.faceTarget = 1;
         else if (this.vx < -TURN_THRESHOLD) this.faceTarget = -1;
         // 휙 뒤집지 않고 몸을 돌리듯 짧게 (HIG: 갑작스러운 변화 대신 자연스러운 전환, '동작 줄이기'면 바로)
         this.face = reduceMotion ? this.faceTarget : this.face + (this.faceTarget - this.face) * Math.min(1, dt / TURN_S * 3);
 
         const prev = Math.sin(this.hop);
-        this.hop += this.hopRate * dt;
+        // 쉬면 깡충이 느려지고(쳐다볼 땐 살랑살랑), 도망칠 땐 빨라짐
+        this.hop += this.hopRate * dt * (this.rest === 'look' ? 0.5 : Math.max(0.3, Math.min(1.6, go)));
         // 착지할 때마다 불똥 튀기기
-        if (go && prev > 0 && Math.sin(this.hop) <= 0) { puff(this.x, this.y, this.w); spark(this.x, this.y - 4, LAND_SPARKS); }
+        if (go > 0.5 && this.amp > 0.5 && prev > 0 && Math.sin(this.hop) <= 0) { puff(this.x, this.y, this.w); spark(this.x, this.y - 4, LAND_SPARKS); }
         // 발이 바닥 가까이 있을 때 달리는 방향 반대쪽으로 작은 불꽃이 바닥을 스침
         this.footT = (this.footT ?? 0) - dt;
-        if (go && Math.abs(Math.sin(this.hop)) < 0.35 && this.footT <= 0) {
+        if (go > 0.5 && Math.abs(Math.sin(this.hop)) < 0.35 && this.footT <= 0) {
           this.footT = FOOT_SPARK_S * (0.6 + Math.random() * 0.8);
           footSpark(this.x + (Math.random() - 0.5) * this.w * 0.4, this.y, Math.sign(this.vx) || 1);
         }
@@ -1153,7 +1214,7 @@
       drawShadow() {
         if (this.held || this.thrown) return;
         const s = Math.abs(Math.sin(this.hop));
-        const air = this.age < this.liftTime() + ENTER_SHRINK_S ? 0 : s;
+        const air = this.age < this.liftTime() + ENTER_SHRINK_S ? 0 : s * this.amp;
         const fade = this.fadeT != null && this.fadeDelay <= 0 ? 1 - this.fadeT : 1;   // 꺼질 때 그림자도 같이 옅어짐
         softEllipse(this.x, this.y, this.w * 0.42 * (1 - air * 0.3), this.h * 0.07 * (1 - air * 0.3), SHADOW_ALPHA * (1 - air * 0.5) * fade);
       }
@@ -1174,10 +1235,14 @@
           size = peak + (1 - peak) * e; raise = this.h0 * LIFT_RAISE * (1 - e); depth = 1 - e;
         }
 
-        const s = this.held || entering ? 0 : Math.abs(Math.sin(this.hop));
-        const lift = s * this.h * 0.18 + raise;
+        const s = this.held || entering ? 0 : Math.abs(Math.sin(this.hop)) * this.amp;
+        // 깨어날 때 깜짝 한 번 뜀
+        const startle = reduceMotion ? 0 : Math.sin((1 - Math.min(1, this.wake)) * Math.PI) * this.h * 0.22;
+        const lift = s * this.h * 0.18 + raise + startle;
         this.lastLift = lift;   // 불티가 지금 머리 위치에서 나오도록 기억
-        const squash = this.held ? 1 / (1 + Math.sin(this.hop) * 0.04) : 1 + (entering ? 0 : (1 - s) * 0.08);
+        // 졸 땐 숨 쉬듯 천천히 부풀었다 줄어듦
+        const breathe = reduceMotion ? 0 : Math.sin(this.age * 2.2) * 0.03 * this.nod;
+        const squash = (this.held ? 1 / (1 + Math.sin(this.hop) * 0.04) : 1 + (entering ? 0 : (1 - s) * 0.08 * this.amp)) * (1 - breathe);
 
         // 불똥이는 정면을 보고 있으니 좌우 반전 대신 가는 방향으로 살짝 기울임
         // 잡을 수 있을 때 살짝 들리고(hover), 집으면 더 커짐 — visionOS의 들어 올림 느낌
@@ -1186,7 +1251,9 @@
         const pop = this.fadeStyle === 'firework';
         const fadeScale = reduceMotion ? 1 : pop ? 1 + 0.18 * Math.sin(Math.min(1, fading * 1.4) * Math.PI / 2) : 1 - 0.3 * fading * fading;
         const grabbed = (this.held ? 1.1 : 1 + 0.05 * this.hover) * fadeScale;
-        const tilt = this.held ? -(this.swing || 0) : this.vx * 0.12 + Math.sin(this.hop * 2) * 0.05 - (this.swing || 0);
+        // 졸 땐 고개를 한쪽으로 꾸벅
+        const doze = this.nod * (0.16 + (reduceMotion ? 0 : Math.sin(this.age * 1.1) * 0.05)) * Math.sign(this.face || 1);
+        const tilt = this.held ? -(this.swing || 0) : (this.vx * 0.12 + Math.sin(this.hop * 2) * 0.05) * Math.min(1, this.go) - (this.swing || 0) + doze;
         ctx.save();
         ctx.translate(this.x, this.y - lift);
         if (this.thrown) {
@@ -1212,6 +1279,23 @@
           ctx.filter = pop ? `brightness(${1 + 0.8 * fading})` : `grayscale(${fading}) brightness(${1 - 0.35 * fading})`;
         }
         ctx.drawImage(this.img, -this.w / 2, -this.h, this.w, this.h);
+        ctx.restore();
+        if (this.nod > 0.05 && !fading) this.drawZzz(lift);
+      }
+
+      // 조는 중: 머리 위로 z가 작게 → 크게 떠오르며 옅어짐 (동작 줄이기면 멈춘 채로)
+      drawZzz(lift) {
+        const dir = Math.sign(this.face || 1), fs = Math.max(12, this.h * 0.16);
+        ctx.save();
+        ctx.fillStyle = '#fff';
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+        ctx.shadowBlur = 6;
+        for (let i = 0; i < 3; i++) {
+          const ph = reduceMotion ? (i + 0.5) / 3 : (this.age * 0.45 + i / 3) % 1;
+          ctx.globalAlpha = Math.sin(ph * Math.PI) * this.nod * 0.9;
+          ctx.font = `600 ${Math.round(fs * (0.6 + ph * 0.6))}px -apple-system, BlinkMacSystemFont, "SF Pro Rounded", "SF Pro Display", "Pretendard Variable", sans-serif`;
+          ctx.fillText('z', this.x + dir * this.w * (0.25 + ph * 0.35), this.y - lift - this.h * (0.95 + ph * 0.45));
+        }
         ctx.restore();
       }
     }
@@ -1308,6 +1392,18 @@
     function firework(x, y, w, palette, angle, spread, ix = 0, iy = 0) {
       if (reduceMotion) return;
       const k = BURST_SCALE;
+      // 드물게 하트·별 모양: 화면 가장자리에서 터져도 모양이 다 보이게 안쪽으로 옮겨서 터뜨림
+      const shape = Math.random() < SPECIAL_FIREWORK ? (Math.random() < 0.5 ? 'heart' : 'star') : null;
+      if (shape) {
+        const R = Math.min(innerWidth, innerHeight) * SHAPE_R;
+        x = Math.min(innerWidth - R * 1.1, Math.max(R * 1.1, x + ix * R * 1.2));
+        y = Math.min(innerHeight - R * 1.1, Math.max(R * 1.1, y + iy * R * 1.2));
+        particles.push({ kind: 'bloom', x, y, r: Math.max(innerWidth, innerHeight) * BURST_BLOOM * k, life: 1, dur: 0.6, col: palette[0] });
+        shapeFirework(x, y, k, palette, shape);
+        spark(x, y, FIREWORK_SPARKS * 0.4 * k, { angle: 0, spread: Math.PI * 2, drag: 3, grav: 120, trail: 0.02, palette, vMin: 150 * k, vMax: 450 * k, dur: 0.5, lw: 1.2 * k, delay: 0.55 });
+        smoke(x, y, w * k, ix, iy, SMOKE_PUFFS);
+        return;
+      }
       particles.push({ kind: 'bloom', x, y, r: Math.max(innerWidth, innerHeight) * BURST_BLOOM * k, life: 1, dur: 0.55 + 0.15 * (k - 1), col: palette[0] });
       const shell = { angle, spread, ring: true, drag: 2.2, grav: 180, trail: 0.07, palette };
       // 큰 링 → 조금 늦게 안쪽 링(다른 색) → 사이사이 흩어지는 불꽃 → 마지막에 작게 타닥타닥
@@ -1331,6 +1427,29 @@
     }
 
     // 던져서 화면 밖에서 터질 때: 그 자리에서 빛이 확 퍼지고, 불꽃이 사방으로 길게 터지고, 연기·불티가 피어오름
+    // 하트·별 모양 불꽃: 모양 둘레의 점마다 불꽃 하나. 공기 저항으로 멈추는 위치가 딱 모양이 되게 속도를 줌
+    //  (속도 v, 저항 d 이면 v/d 만큼 가서 멈춤) → 잠깐 모양이 떠 있다가 천천히 흘러내리며 꺼짐
+    function shapeFirework(x, y, k, palette, shape) {
+      const N = Math.round(FIREWORK_SPARKS * k), R = Math.min(innerWidth, innerHeight) * SHAPE_R, drag = 2.4;
+      const c1 = palette[0], c2 = palette[1 % palette.length];
+      const star = n => { const a = -Math.PI / 2 + n * Math.PI / 5, r = n % 2 ? 0.45 : 1; return [Math.cos(a) * r, Math.sin(a) * r]; };
+      for (let i = 0; i < N && particles.length < PARTICLE_MAX; i++) {
+        let px, py;
+        if (shape === 'heart') {
+          const u = i / N * Math.PI * 2;
+          px = 16 * Math.sin(u) ** 3 / 17;
+          py = -(13 * Math.cos(u) - 5 * Math.cos(2 * u) - 2 * Math.cos(3 * u) - Math.cos(4 * u)) / 17;
+        } else {
+          const f = i / N * 10, j = Math.floor(f), e = f - j, [ax, ay] = star(j), [bx, by] = star(j + 1);
+          px = ax + (bx - ax) * e; py = ay + (by - ay) * e;
+        }
+        particles.push({
+          kind: 'spark', x, y, vx: px * R * drag, vy: py * R * drag, life: 1, dur: 1.3 + Math.random() * 0.2,
+          lw: 2.4 * k, col: i % 2 ? c1 : c2, drag, grav: 40, trail: 0.03
+        });
+      }
+    }
+
     // 던져서 화면 가장자리에서 터질 때: 화면 안쪽으로 부채꼴 폭죽 (불똥이 색)
     function burst(x, y, ix, iy, w, palette) {
       const inward = Math.atan2(iy || -0.3, ix || 0);
@@ -2054,6 +2173,8 @@
 
       updateHands(now, dt);
       updateHover();
+      if (guideOn || pinches.some(p => p.visible) || !lastActive) lastActive = now;
+      idleAll = now - lastActive > IDLE_S * 1000;
       // 집고 있는 불똥이는 맨 앞에
       sprites.sort((a, b) => (a.held - b.held) || (a.y - b.y));
       for (const s of sprites) s.update(dt);
