@@ -1093,7 +1093,8 @@
           if (this.emberT <= 0) {
             this.emberT = (0.5 + Math.random()) / (EMBER_RATE * (this.thrown ? 4 : 1));
             const scale = this.held ? 1.1 : 1;
-            ember(this.x + (Math.random() - 0.5) * this.w * 0.12, this.y - (this.lastLift || 0) - this.h * 0.93 * scale);
+            // 불똥이 자기 색 불티
+            ember(this.x + (Math.random() - 0.5) * this.w * 0.12, this.y - (this.lastLift || 0) - this.h * 0.93 * scale, pickColor(this.palette));
           }
         }
         if (this.thrown) {
