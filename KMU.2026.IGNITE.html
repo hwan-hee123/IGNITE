@@ -148,7 +148,7 @@
   </div>
 
   <script type="module">
-    import { FilesetResolver, InteractiveSegmenter, HandLandmarker, FaceDetector }
+    import { FilesetResolver, InteractiveSegmenter, HandLandmarker }
       from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
 
     // 휴대폰/가상 카메라로 잡히는 장치 이름 (노트북 카메라만 쓰기 위해 제외)
@@ -177,20 +177,6 @@
     const HINT_SMALL = 0.25;     // 이만큼은 채웠는데 부족하면 "가까이" 안내
     const HINT_BG_SPILL = 1.2;   // 넘침이 이보다 크면 배경이 통째로 잡힌 걸로 보고 안내 안 함
     const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 "인식됨"
-    // 이스터에그: 틀에 사람 얼굴이 들어오면 얼굴이 불똥이 모양으로 찍혀 뛰어다니고, 대장 불똥이가 쫓아가 날려버림
-    //  (false로 바꾸면 완전히 꺼짐, 얼굴 AI도 안 불러옴)
-    const FACE_KNOCK = true;
-    const FACE_HOLD_MS = 2000;   // 얼굴만 이만큼 계속 보여야 출동
-    const FACE_CLEAR_MS = 2500;  // 불똥이를 맞추는 기색이 보이면 이만큼은 얼굴을 보지 않음
-    const FACE_OPEN_GRACE_MS = 4000; // 틀을 막 띄운 뒤 이만큼은 얼굴을 보지 않음 (불똥이를 꺼내 드는 시간)
-    const FACE_FIGURE_TIP = 0.2; // 잡힌 모양의 불꽃 끝이 이만큼 차 있으면 불똥이를 맞추는 중으로 봄 (머리는 거의 0)
-    const FACE_MIN_W = 0.3;      // 얼굴 폭이 틀(+여유) 폭의 이만큼은 돼야 함 (뒤에 작게 보이는 얼굴은 무시)
-    const FACE_COOLDOWN_MS = 10000; // 한 번 날린 뒤 이만큼은 쉼
-    const KNOCK_RUN = 2.6;       // 출동할 때 달리는 빠르기 배율
-    const FACE_SHOW_S = 1.2;     // 얼굴 불똥이가 혼자 뛰어다니는 시간 (그다음 대장 출동)
-    const FACE_ALONE_S = 4;      // 불똥이가 하나도 없으면 얼굴 불똥이는 이만큼 뛰다 조용히 꺼짐
-    const KNOCK_WINDUP_S = 0.28; // 웅크렸다 튀어나가기 전 시간
-    const KNOCK_PROUD_S = 1.4;   // 날려버린 뒤 뿌듯하게 뛰는 시간
     const DETECT_INTERVAL_MS = 120; // 불똥이 인식 간격 (길수록 화면이 덜 끊기지만 인식이 조금 느려짐)
     const STAGE_MAX_DPR = 1.25;  // 캔버스 최대 배율 (레티나에서 낮출수록 가벼움, 글자·버튼은 HTML이라 그대로 선명)
     const CAPTURE_DELAY_MS = 500; // 인식된 뒤 실제로 찍기까지 기다리는 시간
@@ -273,7 +259,6 @@
     const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
     const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite';
     const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
-    const FACE_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite';
 
     const PINCH_ON = 0.35;       // 엄지-검지 거리가 손 크기의 이 비율보다 가까우면 "집음"
     const PINCH_OFF = 0.6;       // 이보다 멀어지면 "놓음" (중간은 이전 상태 유지 → 덜 끊김)
@@ -377,9 +362,6 @@
     let stableCount = 0;
     let armed = true;            // 불똥이를 틀에서 뺐다가 다시 넣어야 다음 인식
     let missCount = 0;
-    let faceDet = null;          // 얼굴 감지 AI (이스터에그용)
-    let faceSince = 0, faceMiss = 0, lastKnockAt = -1e9, lastFigureAt = 0;
-    let knock = null;            // 출동: { sprite(대장), target(얼굴 불똥이), phase: 'wait'|'run'|'windup'|'proud', t, side }
     let blink = 0;               // 찍힘 신호 진행 (1 → 0)
     let closeFade = 1;           // 틀 자동 닫기 직전 옅어짐 (1 → 0)
     let glow = 0;                // 유리 가장자리 주황빛 (0~1)
@@ -666,13 +648,6 @@
       catch (e) {
         try { hands = await makeHands('CPU'); } catch (e2) { console.error('손 인식을 불러오지 못했어요', e2); }
       }
-      if (FACE_KNOCK) {
-        const makeFace = (delegate) => FaceDetector.createFromOptions(vision, {
-          baseOptions: { modelAssetPath: FACE_MODEL, delegate }, runningMode: 'IMAGE', minDetectionConfidence: 0.6
-        });
-        try { faceDet = await makeFace('GPU'); }
-        catch (e) { try { faceDet = await makeFace('CPU'); } catch (e2) { console.warn('얼굴 감지를 불러오지 못했어요 (이스터에그만 꺼짐)', e2); } }
-      }
     }
 
     // ---------- 엄지·검지 핀치로 불똥이 잡기 ----------
@@ -788,7 +763,7 @@
     function grabbable(p) {
       let best = null, bestD = Infinity;
       for (const s of sprites) {
-        if (s.holder || s.thrown || s.fadeT != null || s.isFace || (knock && knock.sprite === s)) continue;   // 출동 중이거나, 이미 잡혔거나, 날아가거나, 꺼지는 중이면 못 잡음
+        if (s.holder || s.thrown || s.fadeT != null) continue;   // 이미 잡혔거나, 날아가거나, 꺼지는 중이면 못 잡음
         if (s.age < s.liftTime() + ENTER_SHRINK_S) continue;      // 막 튀어나오는 중이면 못 잡음
         const d = Math.hypot(p.x - s.x, p.y - (s.y - s.h * 0.5));
         if (d < s.h * GRAB_RADIUS && d < bestD) { best = s; bestD = d; }
@@ -982,7 +957,6 @@
       guideOn = on;
       readyAt = 0;
       lastSeenAt = performance.now();
-      if (on) { lastFigureAt = lastSeenAt + FACE_OPEN_GRACE_MS - FACE_CLEAR_MS; faceSince = 0; }
       armed = true;
       stableCount = 0;
       missCount = 0;
@@ -1146,8 +1120,7 @@
         const settled = this.age >= this.liftTime() + ENTER_SHRINK_S;
         let goT = 1, handNear = null, best = HAND_REACT_R * innerHeight;
         const cy = this.y - this.h * 0.5;
-        const myKnock = knock && knock.sprite === this ? knock : null;
-        if (settled && !myKnock && !this.isFace) for (const p of pinches) {
+        if (settled) for (const p of pinches) {
           if (!p.visible || p.sprite) continue;
           const d = Math.hypot(p.x - this.x, p.y - cy);
           if (d < best) { best = d; handNear = p; }
@@ -1172,7 +1145,7 @@
           this.turnIn = Math.max(this.turnIn, 0.4);
         }
         // 한동안 아무도 없으면 차례로 쉼 (졸거나 옆 불똥이 쳐다보기) → 손이나 틀이 나타나면 깜짝 깨어남
-        if (idleAll && !handNear && settled && !this.isFace) {
+        if (idleAll && !handNear && settled) {
           if (!this.rest) {
             this.restIn = (this.restIn ?? Math.random() * 4) - dt;
             if (this.restIn <= 0) this.rest = Math.random() < 0.5 ? 'doze' : 'look';
@@ -1193,31 +1166,43 @@
           else this.rest = 'doze';
         }
         if (this.rest) goT = 0;
-        if (knock && settled && knock.phase !== 'wait') {
-          const f = knock.target;
-          if (myKnock) {
-            if (knock.phase === 'run') {
-              // 얼굴 불똥이 옆으로 전력 질주 (방향은 부드럽게)
-              const dx = knock.tx - this.x, dy = knock.ty - this.y, d = Math.hypot(dx, dy) || 1;
-              const kk = reduceMotion ? 1 : Math.min(1, dt * 8);
-              const nx = this.vx + (dx / d - this.vx) * kk, ny = this.vy + (dy / d - this.vy) * kk, n = Math.hypot(nx, ny) || 1;
-              this.vx = nx / n; this.vy = ny / n;
-              goT = Math.min(KNOCK_RUN, d / 60 + 0.3); hopT = 1.5;
-            } else {
-              goT = 0; hopT = knock.phase === 'proud' ? 1.6 : 1;
-              if (knock.phase === 'windup') this.faceTarget = f.x < this.x ? -1 : 1;
-            }
-            this.turnIn = Math.max(this.turnIn, 0.4);
-          } else if (this === f) {
-            // 얼굴 불똥이: 쫓기는 동안 느릿느릿, 웅크리는 순간 얼어붙음
-            goT = knock.phase === 'run' ? 0.6 : 0;
-          } else if (!this.holder && knock.phase !== 'proud') {
-            // 나머지는 멈춰서 얼굴 불똥이 쪽을 보며 응원하듯 콩콩
-            goT = 0; hopT = 1.2;
-            this.faceTarget = f.x < this.x ? -1 : 1;
-          }
+        const ease = reduceMotion ? 1 : Math.min(1, dt * (goT > this.go ? 4 : 2.5));
+        this.go += (goT - this.go) * ease;
+        this.hopBoost = (this.hopBoost ?? 1) + (hopT - (this.hopBoost ?? 1)) * ease;
+        const ampT = this.rest === 'doze' ? 0 : this.rest === 'look' ? 0.25 : 1;
+        this.amp += (ampT - this.amp) * ease;
+        this.nod += ((this.rest === 'doze' ? 1 : 0) - this.nod) * (reduceMotion ? 1 : Math.min(1, dt * 1.5));
+        if (this.wake > 0) this.wake = Math.max(0, this.wake - dt / 0.45);
+
+        this.turnIn -= dt;
+        if (this.turnIn <= 0) {
+          // 가끔 방향을 바꿔서 이리저리 돌아다니게
+          const a = Math.atan2(this.vy, this.vx) + (Math.random() - 0.5) * 2.4;
+          this.vx = Math.cos(a); this.vy = Math.sin(a);
+          this.turnIn = 1 + Math.random() * 2.5;
         }
-        if (this.rest || (knock && knock.phase !== 'wait' && knock.phase !== 'proud' && knock.sprite !== this && knock.target !== this) || (knock && knock.sprite === this && knock.phase === 'windup')) { /* 쉬거나 얼굴 불똥이를 보는 중엔 방향 그대로 */ }
+        // 등장(떠오름 → 줄어듦) 동안은 제자리, 다 떠오르면 불꽃이 톡 터짐
+        const lifted = this.age >= this.liftTime();
+        if (lifted && !this.burst) { this.burst = true; spark(this.x, this.y - this.h0 * 0.5, 24); }
+        if (this.age < this.liftTime() + (reduceMotion ? 0 : ENTER_SHRINK_S)) return;
+        const go = this.go;
+        this.x += this.vx * this.speed * dt * go;
+        this.y += this.vy * this.speed * dt * go * 0.6;
+
+        const mx = this.w / 2, top = innerHeight * 0.25, bottom = innerHeight - 20;
+        if (this.x < mx) { this.x = mx; this.vx = Math.abs(this.vx); }
+        if (this.x > innerWidth - mx) { this.x = innerWidth - mx; this.vx = -Math.abs(this.vx); }
+        if (this.y < top) {
+          // 높은 곳에서 놓으면 바닥 쪽으로 떨어짐
+          this.fallV = (this.fallV || 0) + 2500 * dt;
+          this.y = Math.min(top, this.y + this.fallV * dt);
+          if (this.y >= top) { this.fallV = 0; this.vy = Math.abs(this.vy); puff(this.x, this.y, this.w * 1.4); }
+        }
+        if (this.y > bottom) { this.y = bottom; this.vy = -Math.abs(this.vy); }
+        this.swing = (this.swing || 0) * 0.9;
+
+        // 가는 방향이 확실히 바뀌었을 때만 돌아섬 (위아래로만 갈 땐 그대로 → 덜 깜빡임)
+        if (this.rest) { /* 쉬는 중엔 방향 그대로 (쳐다보기는 위에서 정함) */ }
         else if (this.vx > TURN_THRESHOLD) this.faceTarget = 1;
         else if (this.vx < -TURN_THRESHOLD) this.faceTarget = -1;
         // 휙 뒤집지 않고 몸을 돌리듯 짧게 (HIG: 갑작스러운 변화 대신 자연스러운 전환, '동작 줄이기'면 바로)
@@ -1271,8 +1256,7 @@
         this.lastLift = lift;   // 불티가 지금 머리 위치에서 나오도록 기억
         // 졸 땐 숨 쉬듯 천천히 부풀었다 줄어듦
         const breathe = reduceMotion ? 0 : Math.sin(this.age * 2.2) * 0.03 * this.nod;
-        const crouch = this.crouch || 0;   // 박치기 전 웅크림
-        const squash = (1 + 0.22 * crouch) * (this.held ? 1 / (1 + Math.sin(this.hop) * 0.04) : 1 + (entering ? 0 : (1 - s) * 0.08 * this.amp)) * (1 - breathe);
+        const squash = (this.held ? 1 / (1 + Math.sin(this.hop) * 0.04) : 1 + (entering ? 0 : (1 - s) * 0.08 * this.amp)) * (1 - breathe);
 
         // 불똥이는 정면을 보고 있으니 좌우 반전 대신 가는 방향으로 살짝 기울임
         // 잡을 수 있을 때 살짝 들리고(hover), 집으면 더 커짐 — visionOS의 들어 올림 느낌
@@ -1654,7 +1638,7 @@
       sprites.push(new Sprite(cutout(), g.x + g.w / 2, g.y + g.h, g.h));
       // 너무 많으면 가장 오래된 것부터 정리 (누가 손에 들고 있는 건 빼고)
       // 너무 많으면 가장 오래된 것부터 차례로 불이 꺼지며 연기로 사라짐 (누가 손에 든 건 빼고)
-      const alive = sprites.filter(s => s.fadeT == null && !s.thrown && !s.isFace);
+      const alive = sprites.filter(s => s.fadeT == null && !s.thrown);
       let excess = alive.length - MAX_SPRITES;
       for (let i = 0, k = 0; excess > 0 && i < alive.length; i++) {
         if (alive[i].held) continue;
@@ -1692,113 +1676,11 @@
       osc.stop(t + 0.2);
     }
 
-    // ---------- 이스터에그: 틀에 얼굴 → 불똥이가 달려가 틀을 날려버림 ----------
-
-    // 틀 안(방금 잘라 본 영역)에 얼굴이 FACE_HOLD_MS 동안 계속 있고, 불똥이로는 인식이 안 되면 출동
-    function checkFace(ok) {
-      const now = performance.now();
-      // 불똥이를 맞추는 중이면(인식됐거나, 불꽃 끝까지 어느 정도 찬 모양이 잡히면) 한동안 얼굴은 보지 않음
-      //  → 얼굴 앞에 불똥이를 들고 맞추는 동안 얼굴 쪽이 터지지 않게
-      const tryingFigure = ok || inside || stableCount > 0 ||
-        (lastInfo && lastInfo.cover >= HINT_SMALL && lastInfo.tip >= FACE_FIGURE_TIP);
-      if (tryingFigure) lastFigureAt = now;
-      if (!faceDet || now - lastFigureAt < FACE_CLEAR_MS) { faceSince = 0; return; }
-      let face = false;
-      try {
-        const r = faceDet.detect(work);
-        face = r.detections.some(d => {
-          const b = d.boundingBox, cx = (b.originX + b.width / 2) / work.width, cy = (b.originY + b.height / 2) / work.height;
-          // 틀 한가운데에 크게, 가려지지 않고 보이는 얼굴만
-          return b.width / work.width >= FACE_MIN_W && cx > 0.3 && cx < 0.7 && cy > 0.2 && cy < 0.8;
-        });
-      } catch (e) { return; }
-      if (face) { faceMiss = 0; if (!faceSince) faceSince = now; }
-      else if (++faceMiss >= 2) faceSince = 0;   // 한 번 놓친 건 봐줌
-      if (faceSince && now - faceSince >= FACE_HOLD_MS && now - lastKnockAt >= FACE_COOLDOWN_MS) {
-        faceSince = 0;
-        startKnock();
-      }
-    }
-
-    // 얼굴을 불똥이 모양으로 찍어서 뛰어다니게 함 → 잠시 뒤 가장 큰 불똥이(대장)가 쫓아가 날려버림
-    //  불똥이가 없거나 '동작 줄이기'면 얼굴 불똥이는 조금 뛰다 조용히 꺼짐
-    function startKnock() {
-      lastKnockAt = performance.now();
-      if (!video.videoWidth) return;
-      const g = guideBox();
-      const target = new Sprite(cutout(), g.x + g.w / 2, g.y + g.h, g.h);
-      target.isFace = true;
-      sprites.push(target);
-      blink = 1;
-      playCaptureSound();
-      setGuide(false);
-      const free = sprites.filter(s => !s.isFace && !s.holder && !s.thrown && s.fadeT == null && s.age > s.liftTime() + ENTER_SHRINK_S);
-      if (!free.length || reduceMotion) { target.fizzle(FACE_ALONE_S); return; }
-      knock = { sprite: free.reduce((a, b) => (b.h > a.h ? b : a)), target, phase: 'wait', t: 0, side: 1 };
-    }
-
-    // 출동 순서: 얼굴 불똥이가 잠깐 뛰어다님 → 대장이 쫓아감 → 옆에서 웅크림 → 박치기(얼굴 불똥이가 빙글 날아가 화면 밖에서 펑) → 뿌듯하게 콩콩
-    function updateKnock(dt) {
-      if (!knock) return;
-      const k = knock, s = k.sprite, f = k.target;
-      k.t += dt;
-      const lost = x => x.gone || x.holder || x.thrown || x.fadeT != null;
-      if (k.phase !== 'proud' && (lost(s) || lost(f))) {
-        // 대장이 잡히거나 사라지면 얼굴 불똥이는 조용히 꺼짐
-        s.crouch = 0; knock = null;
-        if (!lost(f)) f.fizzle(1);
-        return;
-      }
-      if (k.phase === 'wait') {
-        if (f.age > f.liftTime() + ENTER_SHRINK_S + FACE_SHOW_S) { k.phase = 'run'; k.t = 0; }
-      } else if (k.phase === 'run') {
-        k.side = s.x < f.x ? -1 : 1;   // 대장이 얼굴 불똥이의 어느 쪽에 있는지
-        k.tx = f.x + k.side * (f.w * 0.5 + s.w * 0.35);
-        k.ty = f.y;
-        if (Math.hypot(k.tx - s.x, k.ty - s.y) < 18 || k.t > 4) { k.phase = 'windup'; k.t = 0; }
-      } else if (k.phase === 'windup') {
-        s.crouch = Math.min(1, k.t / KNOCK_WINDUP_S);
-        if (k.t >= KNOCK_WINDUP_S) {
-          // 박치기! 얼굴 불똥이는 던진 것처럼 빙글 날아감 (화면 밖에서 기존 폭죽으로 터짐)
-          s.crouch = 0;
-          s.wake = 1;   // 깜짝 뛰기 동작을 그대로 써서 튀어오름
-          const hx = f.x + k.side * f.w * 0.4, hy = f.y - f.h * 0.5;
-          spark(hx, hy, 26, { angle: k.side > 0 ? Math.PI : 0, spread: 1.6, vMin: 200, vMax: 520, dur: 0.45, lw: 2, palette: s.palette });
-          f.thrown = true;
-          f.tvx = -k.side * innerWidth * 0.8;
-          f.tvy = -innerHeight * 1.1;
-          f.spinV = -k.side * 10;
-          f.fallV = 0;
-          playKnockSound();
-          k.phase = 'proud'; k.t = 0;
-        }
-      } else if (k.t >= KNOCK_PROUD_S || s.gone) {
-        knock = null;
-      }
-    }
-
-    // 박치기 소리: 낮고 짧은 "퉁"
-    function playKnockSound() {
-      if (!CAPTURE_SOUND || !audio) return;
-      const t = audio.currentTime;
-      const osc = audio.createOscillator(), gain = audio.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(190, t);
-      osc.frequency.exponentialRampToValueAtTime(70, t + 0.16);
-      gain.gain.setValueAtTime(0.0001, t);
-      gain.gain.exponentialRampToValueAtTime(CAPTURE_SOUND_VOL * 2, t + 0.006);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
-      osc.connect(gain).connect(audio.destination);
-      osc.start(t);
-      osc.stop(t + 0.24);
-    }
-
     async function detectLoop() {
       while (true) {
         if (guideOn && (segWorker || segmenter) && video.videoWidth) {
           let ok = false;
           try { ok = await checkGuide(); } catch (e) { console.error(e); }
-          if (!knock) checkFace(ok);
 
           if (ok) {
             missCount = 0;
@@ -2309,7 +2191,6 @@
       idleAll = now - lastActive > IDLE_S * 1000;
       // 집고 있는 불똥이는 맨 앞에
       sprites.sort((a, b) => (a.held - b.held) || (a.y - b.y));
-      updateKnock(dt);
       for (const s of sprites) s.update(dt);
       if (sprites.some(s => s.gone)) {
         for (const p of pinches) if (p.sprite && p.sprite.gone) p.sprite = null;
