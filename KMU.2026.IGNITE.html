@@ -180,7 +180,11 @@
     // 이스터에그: 틀에 사람 얼굴이 들어오면 얼굴이 불똥이 모양으로 찍혀 뛰어다니고, 대장 불똥이가 쫓아가 날려버림
     //  (false로 바꾸면 완전히 꺼짐, 얼굴 AI도 안 불러옴)
     const FACE_KNOCK = true;
-    const FACE_HOLD_MS = 1200;   // 얼굴이 이만큼 계속 보여야 출동 (불똥이를 얼굴 앞에 잠깐 든 건 무시)
+    const FACE_HOLD_MS = 2000;   // 얼굴만 이만큼 계속 보여야 출동
+    const FACE_CLEAR_MS = 2500;  // 불똥이를 맞추는 기색이 보이면 이만큼은 얼굴을 보지 않음
+    const FACE_OPEN_GRACE_MS = 4000; // 틀을 막 띄운 뒤 이만큼은 얼굴을 보지 않음 (불똥이를 꺼내 드는 시간)
+    const FACE_FIGURE_TIP = 0.2; // 잡힌 모양의 불꽃 끝이 이만큼 차 있으면 불똥이를 맞추는 중으로 봄 (머리는 거의 0)
+    const FACE_MIN_W = 0.3;      // 얼굴 폭이 틀(+여유) 폭의 이만큼은 돼야 함 (뒤에 작게 보이는 얼굴은 무시)
     const FACE_COOLDOWN_MS = 10000; // 한 번 날린 뒤 이만큼은 쉼
     const KNOCK_RUN = 2.6;       // 출동할 때 달리는 빠르기 배율
     const FACE_SHOW_S = 1.2;     // 얼굴 불똥이가 혼자 뛰어다니는 시간 (그다음 대장 출동)
@@ -374,7 +378,7 @@
     let armed = true;            // 불똥이를 틀에서 뺐다가 다시 넣어야 다음 인식
     let missCount = 0;
     let faceDet = null;          // 얼굴 감지 AI (이스터에그용)
-    let faceSince = 0, faceMiss = 0, lastKnockAt = -1e9;
+    let faceSince = 0, faceMiss = 0, lastKnockAt = -1e9, lastFigureAt = 0;
     let knock = null;            // 출동: { sprite(대장), target(얼굴 불똥이), phase: 'wait'|'run'|'windup'|'proud', t, side }
     let blink = 0;               // 찍힘 신호 진행 (1 → 0)
     let closeFade = 1;           // 틀 자동 닫기 직전 옅어짐 (1 → 0)
@@ -978,6 +982,7 @@
       guideOn = on;
       readyAt = 0;
       lastSeenAt = performance.now();
+      if (on) { lastFigureAt = lastSeenAt + FACE_OPEN_GRACE_MS - FACE_CLEAR_MS; faceSince = 0; }
       armed = true;
       stableCount = 0;
       missCount = 0;
@@ -1691,18 +1696,24 @@
 
     // 틀 안(방금 잘라 본 영역)에 얼굴이 FACE_HOLD_MS 동안 계속 있고, 불똥이로는 인식이 안 되면 출동
     function checkFace(ok) {
-      if (!faceDet || ok || inside || stableCount > 0) { faceSince = 0; return; }
+      const now = performance.now();
+      // 불똥이를 맞추는 중이면(인식됐거나, 불꽃 끝까지 어느 정도 찬 모양이 잡히면) 한동안 얼굴은 보지 않음
+      //  → 얼굴 앞에 불똥이를 들고 맞추는 동안 얼굴 쪽이 터지지 않게
+      const tryingFigure = ok || inside || stableCount > 0 ||
+        (lastInfo && lastInfo.cover >= HINT_SMALL && lastInfo.tip >= FACE_FIGURE_TIP);
+      if (tryingFigure) lastFigureAt = now;
+      if (!faceDet || now - lastFigureAt < FACE_CLEAR_MS) { faceSince = 0; return; }
       let face = false;
       try {
         const r = faceDet.detect(work);
         face = r.detections.some(d => {
           const b = d.boundingBox, cx = (b.originX + b.width / 2) / work.width, cy = (b.originY + b.height / 2) / work.height;
-          return cx > 0.2 && cx < 0.8 && cy > 0.15 && cy < 0.85;   // 틀 가운데쯤에 있는 얼굴만
+          // 틀 한가운데에 크게, 가려지지 않고 보이는 얼굴만
+          return b.width / work.width >= FACE_MIN_W && cx > 0.3 && cx < 0.7 && cy > 0.2 && cy < 0.8;
         });
       } catch (e) { return; }
-      const now = performance.now();
       if (face) { faceMiss = 0; if (!faceSince) faceSince = now; }
-      else if (++faceMiss >= 3) faceSince = 0;   // 잠깐 놓친 건 봐줌
+      else if (++faceMiss >= 2) faceSince = 0;   // 한 번 놓친 건 봐줌
       if (faceSince && now - faceSince >= FACE_HOLD_MS && now - lastKnockAt >= FACE_COOLDOWN_MS) {
         faceSince = 0;
         startKnock();
