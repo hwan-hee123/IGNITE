@@ -192,7 +192,8 @@
     const BURST_SPARKS = 34;     // 던져서 터질 때 불꽃 수
     const BURST_EMBERS = 10;     // 터진 뒤 떠오르는 불티 수
     const BURST_BLOOM = 0.22;    // 터질 때 빛이 퍼지는 크기 (화면 긴 변 비율)
-    const PARTICLE_MAX = 400;    // 화면 전체 불티·불꽃 최대 개수 (아이맥이 무거워지지 않게)
+    const BURST_SCALE = 1.5;     // 터짐 세기 배율 (빛·불꽃 수·속도·굵기·연기를 한꺼번에 키움)
+    const PARTICLE_MAX = 500;    // 화면 전체 불티·불꽃 최대 개수 (아이맥이 무거워지지 않게)
     const THROW_SPEED = 0.75;    // 놓기 직전 손 속도가 1초에 화면 높이의 이만큼보다 빠르면 "던짐" → 화면 밖으로 날아감
     const THROW_WINDOW_MS = 200; // 던질 속도를 재는 구간 (손가락 벌리기 직전 이 시간 동안 가장 빨랐던 속도)
     const THROW_BOOST = 1.3;     // 던진 속도에 곱하는 값 (손보다 조금 더 힘차게 날아가게)
@@ -1183,12 +1184,13 @@
     // 던져서 화면 밖에서 터질 때: 그 자리에서 빛이 확 퍼지고, 불꽃이 사방으로 길게 터지고, 연기·불티가 피어오름
     function burst(x, y, ix, iy, w) {
       if (reduceMotion) return;
-      particles.push({ kind: 'bloom', x, y, r: Math.max(innerWidth, innerHeight) * BURST_BLOOM, life: 1, dur: 0.55 });
+      const k = BURST_SCALE;   // 터짐 세기 (빛 크기·불꽃 수·속도·굵기·연기 모두 같이 커짐)
+      particles.push({ kind: 'bloom', x, y, r: Math.max(innerWidth, innerHeight) * BURST_BLOOM * k, life: 1, dur: 0.55 + 0.15 * (k - 1) });
       const inward = Math.atan2(iy || -0.3, ix || 0);   // 화면 안쪽으로 더 많이
-      spark(x, y, BURST_SPARKS, { angle: inward, spread: Math.PI * 1.6, vMin: 250, vMax: 650, dur: 0.5, lw: 2.2 });
-      spark(x, y, BURST_SPARKS * 0.5, { angle: inward, spread: Math.PI * 2, vMin: 80, vMax: 220, dur: 0.6, lw: 1.4 });
-      for (let i = 0; i < BURST_EMBERS; i++) ember(x + (Math.random() - 0.5) * w * 0.6, y + (Math.random() - 0.5) * w * 0.4);
-      smoke(x, y, w * 1.5, ix, iy, SMOKE_PUFFS * 2);
+      spark(x, y, BURST_SPARKS * k, { angle: inward, spread: Math.PI * 1.6, vMin: 250 * k, vMax: 650 * k, dur: 0.5, lw: 2.2 * k });
+      spark(x, y, BURST_SPARKS * 0.5 * k, { angle: inward, spread: Math.PI * 2, vMin: 80 * k, vMax: 220 * k, dur: 0.6, lw: 1.4 * k });
+      for (let i = 0; i < BURST_EMBERS * k; i++) ember(x + (Math.random() - 0.5) * w * 0.6 * k, y + (Math.random() - 0.5) * w * 0.4 * k);
+      smoke(x, y, w * 1.5 * k, ix, iy, Math.round(SMOKE_PUFFS * 2 * k));
     }
 
     function updateParticles(dt) {
