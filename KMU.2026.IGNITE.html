@@ -58,8 +58,8 @@
 
     #status {
       top: max(16px, env(safe-area-inset-top));
-      padding: 10px 18px;
-      font-size: 15px; font-weight: 590; letter-spacing: -0.01em;
+      padding: 12px 22px;
+      font-size: 19px; font-weight: 590; letter-spacing: -0.01em;   /* 1~2m 떨어져서도 읽히게 */
       white-space: nowrap; max-width: calc(100vw - 32px); overflow: hidden; text-overflow: ellipsis;
     }
 
@@ -72,10 +72,10 @@
     #ui button {
       position: relative;
       display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-      min-width: 44px; height: 44px; padding: 0 14px;
+      min-width: 48px; height: 48px; padding: 0 16px;
       border: 0; border-radius: 999px;
       background: transparent; color: var(--label);
-      font: inherit; font-size: 15px; font-weight: 590; letter-spacing: -0.01em;
+      font: inherit; font-size: 17px; font-weight: 590; letter-spacing: -0.01em;
       cursor: pointer; white-space: nowrap;
       transition: background 0.2s ease, transform 0.25s cubic-bezier(0.2, 1.4, 0.4, 1);
     }
@@ -92,6 +92,9 @@
     }
     #ui button.primary:hover { background: rgba(255, 82, 82, 0.92); }
     #ui button.primary.on { background: rgba(255, 255, 255, 0.92); color: #1c1c1e; }
+    /* 준비 전: 흐리게 (아직 누를 수 없음을 보여줌) */
+    #ui button:disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+    #ui button { transition: background 0.2s ease, opacity 0.6s ease-in-out, transform 0.25s cubic-bezier(0.2, 1.4, 0.4, 1); }
 
 
     /* 좁은 화면: 아이콘만 */
@@ -114,7 +117,7 @@
     body.scanning #caption { opacity: 1; }
     body.scanning #status { opacity: 0; }
     @media (prefers-reduced-motion: reduce) { #caption { transition: none; } }
-    .t { display: inline-block; }   /* 글자 바뀔 때 살짝 위아래로 움직이는 전환용 */
+    .t { display: inline-block; }   /* 글자 바뀔 때 밝기 전환용 */
 
     /* 접근성: 투명도 줄이기 / 대비 높이기 */
     @media (prefers-reduced-transparency: reduce) {
@@ -132,14 +135,14 @@
 <body>
   <video id="video" autoplay playsinline muted></video>
   <canvas id="stage"></canvas>
-  <div id="status" class="glass" role="status" aria-live="polite">카메라 연결 중...</div>
+  <div id="status" class="glass" role="status" aria-live="polite">카메라 연결 중</div>
   <div id="caption" aria-hidden="true"></div>
   <div id="ui" class="glass" role="toolbar" aria-label="포토부스">
     <!-- 카메라는 자동으로 내장 카메라를 고름 (선택 목록은 화면에 안 보이게 남겨 둠) -->
     <select id="camSelect" aria-hidden="true" tabindex="-1" hidden></select>
-    <button id="btnCapture" class="primary" title="Space">
+    <button id="btnCapture" class="primary" title="Space" disabled>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3c2.5 3 5.5 5.5 5.5 10a5.5 5.5 0 0 1-11 0c0-2 .8-3.6 2-5 .3 1.6 1.1 2.6 2 3-.4-3 .3-5.6 1.5-8z"/></svg>
-      <span class="txt">틀 띄우기</span>
+      <span class="txt">불똥이 추가</span>
     </button>
     <!-- 모두 지우기는 진행자용 X 키로만 (방문객이 실수로 누르지 않게 버튼은 없음) -->
   </div>
@@ -203,6 +206,17 @@
     const FIZZLE_S = 0.6;        // 불이 꺼지며 사라지는 시간
     const CLEAR_STAGGER_S = 0.06; // 모두 지울 때 하나씩 꺼지는 간격
     const OVERFLOW_STAGGER_S = 0.3; // 10마리 넘을 때 오래된 것부터 꺼지는 간격
+    // 안내 문구 (HIG: 같은 동작은 같은 말로, 짧게) — 버튼 "불똥이 추가"와 안내 "불똥이를 추가하세요"를 맞춤
+    const MSG_LOADING = '준비 중이에요';
+    const MSG_IDLE = 'Space를 눌러 불똥이를 추가하세요';
+    const MSG_FIT = '불똥이를 틀에 맞춰주세요';
+    const MSG_HOLD = '그대로 잠시만요';
+    const MSG_FAR = '조금 더 멀리서 맞춰주세요';
+    const MSG_NEAR = '조금 더 가까이 와주세요';
+    const BTN_ADD = '불똥이 추가';
+    const BTN_CANCEL = '취소';
+    const CAPTURE_SOUND = true;  // 찍힐 때 작은 "톡" 소리 (눈으로만 알리지 않게, HIG Motion)
+    const CAPTURE_SOUND_VOL = 0.12; // 소리 크기 (0~1)
     const AUTO_CLOSE_MS = 15000; // 틀을 띄우고 불똥이가 인식되지 않으면 닫히는 시간
     const TEXT_OUT_MS = 280;     // 문구 바뀔 때 이전 글자가 어두워지는 시간
     const TEXT_IN_MS = 480;      // 새 글자가 밝아지는 시간
@@ -318,6 +332,7 @@
 
     let segmenter = null;        // 화면과 같은 곳에서 돌리는 인식 AI (작업 공간을 못 쓸 때만)
     let segWorker = null;        // 별도 작업 공간에서 돌리는 인식 AI
+    let aiReady = false;         // 인식 AI 준비 끝 (그 전엔 불똥이 추가를 막음)
     let hands = null;
     let lastHandTime = -1;
     // 핀치 커서 (화면 좌표). sprite = 지금 집고 있는 불똥이
@@ -530,7 +545,7 @@
           catch (e) { track = await openCamera(); }   // 실패하면 기본 카메라 유지
         }
         camSelect.value = track.getSettings().deviceId;
-        if (segmenter || segWorker) status.textContent = 'Space를 눌러 불똥이를 추가해보세요';
+        status.textContent = aiReady ? MSG_IDLE : MSG_LOADING;
       } catch (err) {
         status.textContent = CAMERA_ERRORS[err.name] || ('카메라 오류: ' + err.name + ' ' + err.message);
       }
@@ -896,12 +911,12 @@
     //  - 틀 안에 있는데 덜 채움 → 불똥이가 틀보다 작음 → 조금 가까이
     //  - 틀 주변이 통째로 잡힘(벽·배경) 또는 아무것도 없음 → 기본 안내
     function distanceHint(info) {
-      if (info && info.cover >= HINT_COVER && info.spill > SPILL_MAX && info.spill < HINT_BG_SPILL) return '조금 더 멀리서 틀에 맞춰주세요';
-      if (info && info.cover >= HINT_SMALL && info.cover < COVER_OK && info.spill <= SPILL_MAX) return '조금 더 가까이 와서 틀에 맞춰주세요';
-      return '불똥이를 틀에 맞춰주세요';
+      if (info && info.cover >= HINT_COVER && info.spill > SPILL_MAX && info.spill < HINT_BG_SPILL) return MSG_FAR;
+      if (info && info.cover >= HINT_SMALL && info.cover < COVER_OK && info.spill <= SPILL_MAX) return MSG_NEAR;
+      return MSG_FIT;
     }
 
-    // Space: 틀 띄우기 / 숨기기 (틀이 떠 있을 때만 인식)
+    // Space: 불똥이 추가(틀 띄우기) / 취소 (틀이 떠 있을 때만 인식)
     let lastSeenAt = 0;   // 틀을 띄운 시각 또는 마지막으로 불똥이가 인식된 시각 (자동 닫기 기준)
     let guideClosedAt = -1e9;   // 틀이 마지막으로 닫힌 시각 (닫힌 직후엔 핀치를 잠깐 쉼)
     function setGuide(on) {
@@ -914,11 +929,11 @@
       missCount = 0;
       inside = false;
       lastInfo = null;
-      status.textContent = on ? '불똥이를 틀에 맞춰주세요' : 'Space를 눌러 불똥이를 추가해보세요';
+      status.textContent = on ? MSG_FIT : MSG_IDLE;
       // 주요 버튼: 틀이 떠 있으면 "닫기"로
       const btn = document.getElementById('btnCapture');
       btn.classList.toggle('on', on);
-      swapText(btn.querySelector('.txt'), on ? '틀 닫기' : '틀 띄우기');
+      swapText(btn.querySelector('.txt'), on ? BTN_CANCEL : BTN_ADD);
     }
 
     // ---------- 틀 안의 불똥이 → 스프라이트 이미지 ----------
@@ -1125,21 +1140,40 @@
       }
     }
 
+    // ---------- 가볍게 그리기용 미리 만든 그림 ----------
+    // 그림자·연기·불꽃 빛을 매 프레임 계산하지 않고, 한 번 그려둔 그림을 늘리고 옅게 해서 씀 (모양은 같고 훨씬 가벼움)
+    function radialSprite(size, stops) {
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      const g = c.getContext('2d');
+      const gr = g.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+      for (const [o, col] of stops) gr.addColorStop(o, col);
+      g.fillStyle = gr;
+      g.fillRect(0, 0, size, size);
+      return c;
+    }
+    const SHADOW_SPRITE = radialSprite(128, [[0, 'rgba(0,0,0,1)'], [0.45, 'rgba(0,0,0,0.7)'], [1, 'rgba(0,0,0,0)']]);
+    const SMOKE_SPRITE = radialSprite(128, [[0, 'rgba(200,200,205,1)'], [0.5, 'rgba(170,170,178,0.6)'], [1, 'rgba(160,160,168,0)']]);
+    const GLOW_STEPS = 12;   // 불꽃 빛 색을 12단계로 미리 (막 튄 하양-노랑 → 식은 빨강)
+    let glowSprites = null;
+    function glowSprite(t) {
+      if (!glowSprites) {
+        glowSprites = [];
+        for (let i = 0; i < GLOW_STEPS; i++) {
+          const col = fireColor((i / (GLOW_STEPS - 1)) * 0.6, 1);
+          glowSprites.push(radialSprite(32, [[0, col], [0.35, col.replace(', 1)', ', 0.45)')], [1, col.replace(', 1)', ', 0)')]]));
+        }
+      }
+      return glowSprites[Math.max(0, Math.min(GLOW_STEPS - 1, Math.round(t * (GLOW_STEPS - 1))))];
+    }
+
     // 가장자리가 부드럽게 흐려지는 타원 (그림자·먼지)
     function softEllipse(x, y, rx, ry, alpha) {
       if (alpha <= 0.005 || rx < 1) return;
-      ctx.save();
-      ctx.translate(x, y);
-      ctx.scale(1, ry / rx);
-      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
-      g.addColorStop(0, `rgba(0, 0, 0, ${alpha})`);
-      g.addColorStop(0.45, `rgba(0, 0, 0, ${alpha * 0.7})`);
-      g.addColorStop(1, 'rgba(0, 0, 0, 0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(0, 0, rx, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+      const a = ctx.globalAlpha;
+      ctx.globalAlpha = a * Math.min(1, alpha);
+      ctx.drawImage(SHADOW_SPRITE, x - rx, y - ry, rx * 2, ry * 2);
+      ctx.globalAlpha = a;
     }
 
     // 착지: 발밑에서 먼지가 살짝 퍼졌다 사라짐 (머리 위로 튀는 것 없이)
@@ -1251,16 +1285,10 @@
         if (p.kind !== 'smoke' || p.delay > 0) continue;
         const t = 1 - p.life, e = 1 - Math.pow(1 - t, 2);
         const r = p.r0 + p.grow * e;
-        const a = SMOKE_ALPHA * Math.min(1, t * 6) * p.life;   // 빠르게 짙어졌다 천천히 옅어짐
-        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
-        g.addColorStop(0, `rgba(200, 200, 205, ${a})`);
-        g.addColorStop(0.5, `rgba(170, 170, 178, ${a * 0.6})`);
-        g.addColorStop(1, 'rgba(160, 160, 168, 0)');
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.globalAlpha = SMOKE_ALPHA * Math.min(1, t * 6) * p.life;   // 빠르게 짙어졌다 천천히 옅어짐
+        ctx.drawImage(SMOKE_SPRITE, p.x - r, p.y - r, r * 2, r * 2);
       }
+      ctx.globalAlpha = 1;
     }
 
     // 불 온도 색: 막 튀었을 땐 하양-노랑, 식을수록 주황 → 빨강(#FE3636)
@@ -1293,7 +1321,6 @@
           g.addColorStop(0.25, `rgba(255, 150, 70, ${a * 0.7})`);
           g.addColorStop(0.6, `rgba(254, 54, 54, ${a * 0.3})`);
           g.addColorStop(1, 'rgba(254, 54, 54, 0)');
-          ctx.shadowBlur = 0;
           ctx.fillStyle = g;
           ctx.beginPath();
           ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
@@ -1303,8 +1330,11 @@
         const t = p.life, a = Math.min(1, t * 1.6) * (p.kind === 'ember' ? 0.9 : 1);
         // 불티는 꺼지기 직전 살짝 깜빡임
         const flick = p.kind === 'ember' && t < 0.35 ? 0.6 + 0.4 * Math.sin(p.wob * 3) : 1;
-        ctx.shadowColor = fireColor(t * 0.6, a * 0.8);
-        ctx.shadowBlur = 8;
+        // 은은한 빛 (미리 그려둔 빛 그림을 깔아줌 — 예전 그림자 흐림과 같은 느낌)
+        const halo = p.kind === 'spark' ? 9 + (p.lw || 1.6) * 2 : 9 + p.r * 2;
+        ctx.globalAlpha = a * 0.8 * flick;
+        ctx.drawImage(glowSprite(t), p.x - halo, p.y - halo, halo * 2, halo * 2);
+        ctx.globalAlpha = 1;
         if (p.kind === 'spark') {
           // 움직이는 방향으로 짧은 빛줄기
           ctx.strokeStyle = fireColor(t, a);
@@ -1360,9 +1390,34 @@
         excess--;
       }
       blink = 1;
+      playCaptureSound();
       // 유리는 부드럽게 풀리며 틀이 닫히고 깨끗한 화면으로 (다음 불똥이는 다시 Space)
       setGuide(false);
-      status.textContent = '다음 불똥이를 추가하려면 Space를 눌러주세요';
+    }
+
+    // 찍힐 때 작은 "톡" 소리 (파일 없이 브라우저에서 바로 만듦)
+    // 브라우저는 사람이 키를 한 번 누르기 전엔 소리를 막아서, 첫 Space/버튼 때 소리를 깨워 둠
+    let audio = null;
+    function unlockSound() {
+      if (!CAPTURE_SOUND) return;
+      try {
+        audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+        if (audio.state === 'suspended') audio.resume();
+      } catch (e) { audio = null; }
+    }
+    function playCaptureSound() {
+      if (!CAPTURE_SOUND || !audio) return;
+      const t = audio.currentTime;
+      const osc = audio.createOscillator(), gain = audio.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1180, t);
+      osc.frequency.exponentialRampToValueAtTime(620, t + 0.12);   // 살짝 내려가는 맑은 소리
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(CAPTURE_SOUND_VOL, t + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+      osc.connect(gain).connect(audio.destination);
+      osc.start(t);
+      osc.stop(t + 0.2);
     }
 
     async function detectLoop() {
@@ -1386,7 +1441,7 @@
           }
 
           if (armed && inside) {
-            status.textContent = '그대로 잠시만 기다려주세요';
+            status.textContent = MSG_HOLD;
             // 인식이 안정된 뒤에도 잠깐(CAPTURE_DELAY_MS) 기다렸다가 찍음 → 그동안 틀 색이 아래부터 차오름
             if (stableCount >= STABLE_NEEDED) {
               if (!readyAt) readyAt = performance.now();
@@ -1944,7 +1999,13 @@
       else document.documentElement.requestFullscreen();
     }
 
-    document.getElementById('btnCapture').onclick = () => setGuide(!guideOn);
+    // 불똥이 추가/취소: AI가 준비되기 전엔 눌러도 틀을 띄우지 않고 "준비 중"만 알려줌
+    function toggleGuide() {
+      unlockSound();
+      if (!aiReady) { status.textContent = MSG_LOADING; return; }
+      setGuide(!guideOn);
+    }
+    document.getElementById('btnCapture').onclick = toggleGuide;
     // 모두 지우기: 한꺼번에 툭 사라지지 않고, 하나씩 아주 짧은 간격으로 불이 꺼지며 연기로 사라짐
     function clearSprites() {
       sprites.filter(s => !s.thrown && s.fadeT == null).forEach((s, i) => s.fizzle(i * CLEAR_STAGGER_S));
@@ -1952,7 +2013,7 @@
     // 마우스로 누른 버튼에 포커스가 남으면 Space가 그 버튼을 또 눌러서 풀어줌
     for (const b of document.querySelectorAll('#ui button')) b.addEventListener('pointerup', () => b.blur());
     addEventListener('keydown', e => {
-      if (e.code === 'Space') { e.preventDefault(); setGuide(!guideOn); }
+      if (e.code === 'Space') { e.preventDefault(); toggleGuide(); }
       else if (e.key === 'Enter' && guideOn) capture();   // 틀이 떠 있을 때 바로 인식
       // 글자 대신 키보드 자리(e.code)로 판단 → 한글 입력 상태여도 동작
       else if (e.code === 'KeyX') clearSprites();
@@ -1967,7 +2028,9 @@
     startLaptopCamera();
     loadModels()
       .then(() => {
-        if (video.videoWidth) status.textContent = 'Space를 눌러 불똥이를 추가해보세요';
+        aiReady = true;
+        document.getElementById('btnCapture').disabled = false;
+        if (video.videoWidth) status.textContent = MSG_IDLE;
         detectLoop();
       })
       .catch(err => { status.textContent = 'AI 모델을 불러오지 못했어요: ' + err.message; });
