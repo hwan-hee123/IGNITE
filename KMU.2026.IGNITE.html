@@ -166,6 +166,7 @@
     const COVER_OK = 0.8;        // 틀 안이 불똥이로 이만큼 차 있어야 함
     const SPILL_MAX = 0.4;       // 틀 밖으로 삐져나온 부분은 이만큼까지만 (배경·벽이 통째로 잡히는 것 거르기)
     const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 "인식됨"
+    const DETECT_INTERVAL_MS = 120; // 불똥이 인식 간격 (길수록 화면이 덜 끊기지만 인식이 조금 느려짐)
     const CAPTURE_DELAY_MS = 500; // 인식된 뒤 실제로 찍기까지 기다리는 시간
     // 스캔 진행은 유리가 아니라 틀 색이 아래→위로 차오르는 걸로 보여줌 (유리는 그대로)
     const SCAN_FROST = 0;        // 스캔 중 유리가 더 흐려지는 정도
@@ -201,8 +202,10 @@
     const GLASS_REFRACT_PX = 0;  // 경사면에서 뒤 화면이 휘는 정도 (0 = 안 휨, 밝은 배경이 틀 밖으로 번지지 않게)
     const GLASS_RIM = 0;         // 틀 가장자리 유리 반사광 (0 = 없음, 흰 윤곽선만)
     const GLASS_BLUR_PX = 34;    // 흐림 반경 (px, 클수록 더 뿌옇게)
-    const GLASS_FROST = 2.0;     // 흐림 전 미리 살짝 뭉개는 정도 (흐림을 매끈하게)
-    const GLASS_FROST_SOLID = 3.0; // '투명도 줄이기' 설정일 때
+    const GLASS_FROST = 0.4;     // 흐림 전 미리 살짝 뭉개는 정도 (흐림을 매끈하게, 줄인 영상 기준)
+    const GLASS_FROST_SOLID = 1.4; // '투명도 줄이기' 설정일 때
+    const GLASS_RES = 0.5;       // 유리를 계산하는 해상도 (화면 대비, 낮을수록 가벼움 — 흐린 부분이라 티가 거의 안 남)
+    const GLASS_SRC_W = 480;     // 유리 흐림에 쓰는 카메라 영상 가로 크기 (작게 줄여서 올림)
     const GLASS_SAT = 1.15;      // 채도 (색이 튀지 않게 거의 그대로)
     const GLASS_TINT_DARK = 0.0; // 어두운 틴트 세기 (0 = 원래 밝기 그대로, 키우면 틀 밖이 어두워짐)
     const GLASS_SHADOW = 0;      // 구멍 안 그림자 (0 = 없음, 틀 안을 깨끗하게)
@@ -723,6 +726,7 @@
         if (!best || (ok && !best.ok) || (ok === best.ok && cover - spill > best.cover - best.spill)) {
           best = { mask, cover, spill, ok };
         }
+        if (ok) break;   // 첫 번째 점으로 인식되면 두 번째는 건너뜀 (AI 계산을 반으로)
       }
       lastInfo = best;
       return !!(best && best.ok);
@@ -1169,7 +1173,8 @@
             }
           }
         }
-        await new Promise(r => setTimeout(r, 80));
+        // 인식 사이에 잠깐 쉬어서 화면 그리기가 끊기지 않게
+        await new Promise(r => setTimeout(r, DETECT_INTERVAL_MS));
       }
     }
 
@@ -1261,15 +1266,15 @@
         vec2 center = uRes * 0.5;
         vec2 p = center + (px - center) / uMag;
         vec2 off = -n * slope * uRefract * open * (1.0 + uScan * uScanRefract);
-        // 부드러운 흐림: 주변 24곳을 나선(황금각)으로 고르게 찍어 평균 → 줄인 영상을 키울 때 생기는 픽셀 계단이 없음
+        // 부드러운 흐림: 주변 16곳을 나선(황금각)으로 고르게 찍어 평균 → 줄인 영상을 키울 때 생기는 픽셀 계단이 없음
         vec3 col = vec3(0.0);
-        for (int i = 0; i < 24; i++) {
+        for (int i = 0; i < 16; i++) {
           float fi = float(i) + 0.5;
-          float r = sqrt(fi / 24.0) * uBlurPx;
+          float r = sqrt(fi / 16.0) * uBlurPx;
           float a = fi * 2.39996;
           col += textureLod(uVideo, videoUv(p + off + vec2(cos(a), sin(a)) * r), uFrost).rgb;
         }
-        col /= 24.0;
+        col /= 16.0;
 
         // 젖빛 유리: 흐림만 주고 밝기는 원래 화면 그대로 유지 (어두워지지 않게)
         float l = dot(col, vec3(0.299, 0.587, 0.114));
@@ -1407,6 +1412,9 @@
 
       const RANGE = GLASS_BEVEL * 2.5;   // 거리맵이 담는 범위 (틀 키 단위)
       let sdfRect = null;
+      let lastKey = '';
+      const small = document.createElement('canvas');
+      const smallc = small.getContext('2d');
 
       return {
         canvas,
@@ -1424,15 +1432,23 @@
             gl.bindTexture(gl.TEXTURE_2D, maskTex);
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, guideSil);
           }
-          const q = Math.min(window.devicePixelRatio || 1, 1.5);
-          const w = Math.round(innerWidth * q), h = Math.round(innerHeight * q);
-          if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+          // 유리는 어차피 흐려서 화면보다 낮은 해상도로 계산하고 키워 그려도 똑같아 보임 (레티나에서 특히 가벼워짐)
+          const w = Math.round(innerWidth * GLASS_RES), h = Math.round(innerHeight * GLASS_RES);
+          const resized = canvas.width !== w || canvas.height !== h;
+          if (resized) { canvas.width = w; canvas.height = h; }
+
+          // 카메라 새 장면이 없고 연출 값도 그대로면 지난번 그림을 그대로 씀 (화면 60번 vs 카메라 30장)
+          const key = [video.currentTime, amount.toFixed(3), scanAmount.toFixed(3), g.x | 0, g.y | 0, g.w | 0, reduceTransparency].join();
+          if (!resized && key === lastKey) return canvas;
+          lastKey = key;
           gl.viewport(0, 0, w, h);
 
-          // 매 프레임 카메라 영상을 텍스처로 (흐림용 축소본 포함)
+          // 카메라 영상은 작게 줄여서 올림 (흐림용이라 큰 영상이 필요 없음 → 올리는 시간·메모리 절약)
+          if (small.width !== GLASS_SRC_W) { small.width = GLASS_SRC_W; small.height = Math.round(GLASS_SRC_W * video.videoHeight / video.videoWidth); }
+          smallc.drawImage(video, 0, 0, small.width, small.height);
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, videoTex);
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, small);
           gl.generateMipmap(gl.TEXTURE_2D);
 
           const L = videoLayout();
