@@ -1124,11 +1124,23 @@
           const d = Math.hypot(p.x - this.x, p.y - cy);
           if (d < best) { best = d; handNear = p; }
         }
+        // 깡충 박자는 늘 제 속도 (느려지면 슬로모션처럼 보여서) — 멈출 땐 제자리에서 뛰고, 신나면 박자만 살짝 빨라짐
+        let hopT = 1;
         if (handNear) {
           const dx = handNear.x - this.x, dy = handNear.y - cy, d = Math.hypot(dx, dy) || 1;
-          if (this.hovered) goT = 0.3;
-          else if (this.handMood < 0) { this.vx = -dx / d; this.vy = -dy / d; goT = HAND_FLEE_BOOST; }
-          else { this.vx = dx / d; this.vy = dy / d; goT = d < this.w ? 0.2 : 1.3; }   // 손 바로 앞에선 멈춰서 기다림
+          let ux = dx / d, uy = dy / d;
+          if (this.handMood < 0) {
+            // 겁쟁이: 반대로 달아남. 커서가 바로 위에 오면 얼어붙은 듯 제자리 콩콩 (그때 잡을 수 있음)
+            ux = -ux; uy = -uy;
+            goT = this.hovered ? 0 : HAND_FLEE_BOOST; hopT = 1.35;
+          } else {
+            // 반가움: 손 쪽으로 가서 바로 앞에선 제자리에서 신나게 콩콩
+            goT = d < this.w ? 0 : 1.3; hopT = 1.2;
+          }
+          // 방향을 휙 꺾지 않고 몸을 돌리듯 부드럽게 틂
+          const k = reduceMotion ? 1 : Math.min(1, dt * 6);
+          const nx = this.vx + (ux - this.vx) * k, ny = this.vy + (uy - this.vy) * k, n = Math.hypot(nx, ny) || 1;
+          this.vx = nx / n; this.vy = ny / n;
           this.turnIn = Math.max(this.turnIn, 0.4);
         }
         // 한동안 아무도 없으면 차례로 쉼 (졸거나 옆 불똥이 쳐다보기) → 손이나 틀이 나타나면 깜짝 깨어남
@@ -1155,6 +1167,7 @@
         if (this.rest) goT = 0;
         const ease = reduceMotion ? 1 : Math.min(1, dt * (goT > this.go ? 4 : 2.5));
         this.go += (goT - this.go) * ease;
+        this.hopBoost = (this.hopBoost ?? 1) + (hopT - (this.hopBoost ?? 1)) * ease;
         const ampT = this.rest === 'doze' ? 0 : this.rest === 'look' ? 0.25 : 1;
         this.amp += (ampT - this.amp) * ease;
         this.nod += ((this.rest === 'doze' ? 1 : 0) - this.nod) * (reduceMotion ? 1 : Math.min(1, dt * 1.5));
@@ -1195,10 +1208,10 @@
         this.face = reduceMotion ? this.faceTarget : this.face + (this.faceTarget - this.face) * Math.min(1, dt / TURN_S * 3);
 
         const prev = Math.sin(this.hop);
-        // 쉬면 깡충이 느려지고(쳐다볼 땐 살랑살랑), 도망칠 땐 빨라짐
-        this.hop += this.hopRate * dt * (this.rest === 'look' ? 0.5 : Math.max(0.3, Math.min(1.6, go)));
-        // 착지할 때마다 불똥 튀기기
-        if (go > 0.5 && this.amp > 0.5 && prev > 0 && Math.sin(this.hop) <= 0) { puff(this.x, this.y, this.w); spark(this.x, this.y - 4, LAND_SPARKS); }
+        // 깡충 박자: 쳐다볼 땐 살랑살랑 느리게, 손 근처에선 살짝 빠르게 (걷는 속도와는 따로)
+        this.hop += this.hopRate * dt * (this.rest === 'look' ? 0.5 : this.hopBoost);
+        // 착지할 때마다 불똥 튀기기 (제자리에서 뛸 때도)
+        if (this.amp > 0.5 && prev > 0 && Math.sin(this.hop) <= 0) { puff(this.x, this.y, this.w); spark(this.x, this.y - 4, LAND_SPARKS); }
         // 발이 바닥 가까이 있을 때 달리는 방향 반대쪽으로 작은 불꽃이 바닥을 스침
         this.footT = (this.footT ?? 0) - dt;
         if (go > 0.5 && Math.abs(Math.sin(this.hop)) < 0.35 && this.footT <= 0) {
