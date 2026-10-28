@@ -170,6 +170,9 @@
     const MARGIN = 0.15;         // 틀 바깥으로 얼마나 더 보고 판단할지 (틀 크기 비율)
     const COVER_OK = 0.72;       // 틀 안이 불똥이로 이만큼 차 있어야 함 (조금 비뚤어져도 인식되게)
     const SPILL_MAX = 0.8;       // 틀 밖으로 삐져나온 부분은 이만큼까지만 (불똥이를 든 손은 괜찮고, 배경·벽이 통째로 잡히는 건 거름)
+    const TIP_BAND = 0.3;        // 틀 위쪽 이만큼(높이 비율)을 불꽃 끝 부분으로 봄
+    const TIP_COVER_MIN = 0.4;   // 불꽃 끝 부분도 이만큼은 차야 함 (뒤 배경 판·책상처럼 아래만 꽉 차는 건 거름)
+    const EDGE_MAX = 0.25;       // 잘라 본 영역 테두리에 닿은 비율이 이보다 크면 배경 (불똥이 든 팔 정도는 괜찮음)
     const HINT_COVER = 0.6;      // 이만큼 채웠는데 넘치면 "멀리" 안내
     const HINT_SMALL = 0.25;     // 이만큼은 채웠는데 부족하면 "가까이" 안내
     const HINT_BG_SPILL = 1.2;   // 넘침이 이보다 크면 배경이 통째로 잡힌 걸로 보고 안내 안 함
@@ -493,9 +496,19 @@
       cc.drawImage(silhouette, mx, my, w - mx * 2, h - my * 2);
       const d = cc.getImageData(0, 0, w, h).data;
       const g = new Uint8Array(w * h);
-      let area = 0;
-      for (let i = 0; i < g.length; i++) if (d[i * 4 + 3] > 127) { g[i] = 1; area++; }
-      Object.assign(tplCache, { key, g, area });
+      let area = 0, top = h, bottom = 0;
+      for (let i = 0; i < g.length; i++) if (d[i * 4 + 3] > 127) {
+        g[i] = 1; area++;
+        const y = (i / w) | 0;
+        if (y < top) top = y;
+        if (y > bottom) bottom = y;
+      }
+      // 불꽃 끝 부분 (틀 위쪽)
+      const tipY = top + (bottom - top) * TIP_BAND;
+      const tip = new Uint8Array(w * h);
+      let tipArea = 0;
+      for (let i = 0; i < g.length; i++) if (g[i] && i < tipY * w) { tip[i] = 1; tipArea++; }
+      Object.assign(tplCache, { key, g, area, tip, tipArea });
       return tplCache;
     }
 
@@ -861,6 +874,24 @@
       return comp;
     }
 
+    // 잡힌 덩어리가 불똥이 모양인지 점수 매기기
+    //  cover: 틀을 채운 비율 / spill: 틀 밖으로 넘친 양 / tip: 불꽃 끝 부분을 채운 비율 / edge: 잘라 본 영역 테두리에 닿은 비율
+    //  뒤 배경(판·벽·책상)은 틀 아래쪽을 꽉 채워도 불꽃 끝이 비어 있고 테두리 밖으로 이어져 있어서 거름
+    function scoreMask(mask, t, w, h) {
+      let inter = 0, outside = 0, tipIn = 0;
+      for (let i = 0; i < mask.length; i++) {
+        if (!mask[i]) continue;
+        if (t.g[i]) { inter++; if (t.tip[i]) tipIn++; } else outside++;
+      }
+      let edgeIn = 0;
+      for (let x = 0; x < w; x++) edgeIn += mask[x] + mask[(h - 1) * w + x];
+      for (let y = 1; y < h - 1; y++) edgeIn += mask[y * w] + mask[y * w + w - 1];
+      const cover = inter / t.area, spill = outside / t.area;
+      const tip = tipIn / t.tipArea, edge = edgeIn / (2 * (w + h) - 4);
+      const ok = cover >= COVER_OK && spill <= SPILL_MAX && tip >= TIP_COVER_MIN && edge <= EDGE_MAX;
+      return { cover, spill, tip, edge, ok };
+    }
+
     // 틀(+여유) 부분만 잘라서 틀 가운데를 찍어보고, 잘린 물체가 틀을 얼마나 채우는지 계산
     const PROBE_POINTS = [[0.5, 0.55], [0.5, 0.4]];   // 몸통 가운데, 조금 위
     async function checkGuide() {
@@ -891,17 +922,11 @@
         const [px, py] = PROBE_POINTS[k];
         const mask = componentAt(raws[k], w, h, px, py);
         if (!mask) continue;
-        let inter = 0, outside = 0;
-        for (let i = 0; i < mask.length; i++) {
-          if (!mask[i]) continue;
-          if (t.g[i]) inter++; else outside++;
+        const sc = scoreMask(mask, t, w, h);
+        if (!best || (sc.ok && !best.ok) || (sc.ok === best.ok && sc.cover - sc.spill > best.cover - best.spill)) {
+          best = { mask, ...sc };
         }
-        const cover = inter / t.area, spill = outside / t.area;
-        const ok = cover >= COVER_OK && spill <= SPILL_MAX;
-        if (!best || (ok && !best.ok) || (ok === best.ok && cover - spill > best.cover - best.spill)) {
-          best = { mask, cover, spill, ok };
-        }
-        if (ok) break;   // 첫 번째 점으로 인식되면 두 번째는 볼 필요 없음
+        if (best.ok) break;   // 첫 번째 점으로 인식되면 두 번째는 볼 필요 없음
       }
       lastInfo = best;
       return !!(best && best.ok);
@@ -912,8 +937,8 @@
     //  - 틀 안에 있는데 덜 채움 → 불똥이가 틀보다 작음 → 조금 가까이
     //  - 틀 주변이 통째로 잡힘(벽·배경) 또는 아무것도 없음 → 기본 안내
     function distanceHint(info) {
-      if (info && info.cover >= HINT_COVER && info.spill > SPILL_MAX && info.spill < HINT_BG_SPILL) return MSG_FAR;
-      if (info && info.cover >= HINT_SMALL && info.cover < COVER_OK && info.spill <= SPILL_MAX) return MSG_NEAR;
+      if (info && info.cover >= HINT_COVER && info.tip >= TIP_COVER_MIN && info.spill > SPILL_MAX && info.spill < HINT_BG_SPILL) return MSG_FAR;
+      if (info && info.cover >= HINT_SMALL && info.cover < COVER_OK && info.spill <= SPILL_MAX && info.edge <= EDGE_MAX) return MSG_NEAR;
       return MSG_FIT;
     }
 
@@ -2055,14 +2080,15 @@
       ctx.drawImage(dbg, 0, 0, dw, dh);
       ctx.restore();
       ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-      ctx.fillRect(12, 12 + dh, Math.max(dw, 190), 54);
+      ctx.fillRect(12, 12 + dh, Math.max(dw, 260), 70);
       ctx.fillStyle = '#fff';
       ctx.font = '12px sans-serif';
       if (info) {
         ctx.fillText(`틀 채움 ${(info.cover * 100) | 0}% (${COVER_OK * 100}%↑)`, 18, 12 + dh + 16);
         ctx.fillText(`틀 밖 ${(info.spill * 100) | 0}% (${SPILL_MAX * 100}%↓)`, 18, 12 + dh + 32);
+        ctx.fillText(`불꽃 끝 ${(info.tip * 100) | 0}% (${TIP_COVER_MIN * 100}%↑)  테두리 ${(info.edge * 100) | 0}% (${EDGE_MAX * 100}%↓)`, 18, 12 + dh + 48);
       }
-      ctx.fillText(`안정 ${stableCount}/${STABLE_NEEDED} ${armed ? '' : '(빼기 대기)'}`, 18, 12 + dh + 48);
+      ctx.fillText(`안정 ${stableCount}/${STABLE_NEEDED} ${armed ? '' : '(빼기 대기)'}`, 18, 12 + dh + 64);
     }
 
     // ---------- 조작 ----------
