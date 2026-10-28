@@ -191,7 +191,7 @@
     const FIZZLE_S = 0.6;        // 불이 꺼지며 사라지는 시간
     const CLEAR_STAGGER_S = 0.06; // 모두 지울 때 하나씩 꺼지는 간격
     const OVERFLOW_STAGGER_S = 0.3; // 10마리 넘을 때 오래된 것부터 꺼지는 간격
-    const AUTO_CLOSE_MS = 5000;  // 틀을 띄우고 불똥이가 인식되지 않으면 닫히는 시간
+    const AUTO_CLOSE_MS = 10000; // 틀을 띄우고 불똥이가 인식되지 않으면 닫히는 시간
     const AUTO_CLOSE_FADE_MS = 1000; // 닫히기 전 윤곽선이 옅어지는 시간
     const TURN_THRESHOLD = 0.2;  // 좌우 속도가 이보다 커야 돌아섬 (작은 흔들림엔 그대로)
     const LIFT_SCALE = 0.08;     // 떠오를 때 커지는 비율
@@ -226,6 +226,9 @@
     const PINCH_OFF = 0.5;       // 이보다 멀어지면 "놓음" (중간은 이전 상태 유지 → 덜 끊김)
     const GRAB_RADIUS = 0.6;     // 불똥이 키의 이 비율 안에서 집으면 잡힘
     const MAX_HANDS = 4;         // 동시에 인식하는 손 개수 (손마다 불똥이 하나씩 잡을 수 있음)
+    const HAND_LOST_MS = 450;    // 집고 있는 손을 이 시간 동안 놓쳐도 계속 들고 있음 (빠르게 움직일 때 끊김 방지)
+    const RELEASE_FRAMES = 3;    // 손가락이 연속으로 이만큼 벌어져 있어야 놓음 (흔들림에 잘못 놓치지 않게)
+    const HOLD_MATCH = 0.5;      // 집고 있는 손을 다음 프레임에서 찾을 때 허용 거리 (화면 높이 비율)
     const CURSOR_R = 18;         // 핀치 커서 크기 (손가락을 벌렸을 때)
     const CURSOR_R_PRESS = 9;    // 집었을 때 커서 크기
 
@@ -290,7 +293,7 @@
     // 핀치 커서 (화면 좌표). sprite = 지금 집고 있는 불똥이
     // 손마다 핀치 커서 하나 (최대 MAX_HANDS개). sprite = 그 손이 집고 있는 불똥이
     const pinches = Array.from({ length: MAX_HANDS }, () => ({
-      visible: false, seen: false, miss: 0, down: false, x: 0, y: 0, vx: 0, vy: 0, gap: 1,
+      visible: false, seen: false, lastT: 0, openCount: 0, down: false, x: 0, y: 0, vx: 0, vy: 0, gap: 1,
       sprite: null, offX: 0, offY: 0, hover: null,
       alpha: 0, r: CURSOR_R, press: 0, accent: 0       // 커서 애니메이션 상태
     }));
@@ -558,7 +561,9 @@
       // 손 인식은 실패해도 사진 인식은 계속 되게 따로
       const makeHands = (delegate) => HandLandmarker.createFromOptions(vision, {
         baseOptions: { modelAssetPath: HAND_MODEL, delegate },
-        runningMode: 'VIDEO', numHands: MAX_HANDS
+        runningMode: 'VIDEO', numHands: MAX_HANDS,
+        // 빠르게 움직여 흐릿해진 손도 계속 따라가게 (기본 0.5 → 0.3)
+        minHandPresenceConfidence: 0.3, minTrackingConfidence: 0.3
       });
       try { hands = await makeHands('GPU'); }
       catch (e) {
@@ -596,39 +601,57 @@
         return { x: p.x, y: p.y, gap: Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y) / size };
       });
 
-      // 이번 프레임의 손을 지난 프레임의 같은 손과 짝지음 (가까운 것끼리) → 손마다 따로 집기
+      // 이번 프레임의 손을 지난 프레임의 같은 손과 짝지음 → 손마다 따로 집기
+      // 빠르게 움직이면 한 프레임에 많이 이동하니, 지금 속도로 "있을 법한 자리"와 비교하고 집고 있는 손은 더 넓게 찾음
+      const t = performance.now();
       for (const p of pinches) p.seen = false;
       for (const f of found) {
         let best = null, bestD = Infinity;
         for (const p of pinches) {
           if (p.seen || !p.visible) continue;
-          const d = Math.hypot(p.x - f.x, p.y - f.y);
-          if (d < bestD) { best = p; bestD = d; }
+          const ahead = Math.min(0.15, (t - p.lastT) / 1000);
+          const d = Math.hypot(p.x + p.vx * ahead - f.x, p.y + p.vy * ahead - f.y);
+          const limit = innerHeight * (p.down ? HOLD_MATCH : 0.25);
+          if (d < limit && d < bestD) { best = p; bestD = d; }
         }
-        if (!best || bestD > innerHeight * 0.25) best = pinches.find(p => !p.seen && !p.visible) || best;
-        if (best && !best.seen) trackHand(best, f, dt);
+        if (!best) best = pinches.find(p => !p.seen && !p.visible);
+        if (best) trackHand(best, f, t);
       }
-      // 몇 프레임 연속으로 안 보이면 사라진 손 (잡고 있던 불똥이는 놓음)
+      // 손을 잠깐 놓쳐도 바로 놓지 않음: 집고 있으면 그 속도로 계속 따라가다 HAND_LOST_MS 지나면 놓음
       for (const p of pinches) {
-        if (!p.seen && p.visible && ++p.miss > 4) { p.visible = false; if (p.down) pinchEnd(p); }
+        if (p.seen || !p.visible) continue;
+        const lost = t - p.lastT;
+        if (p.down && lost < HAND_LOST_MS) {
+          const step = Math.min(0.05, dt);
+          p.x += p.vx * step; p.y += p.vy * step;
+          p.vx *= 0.9; p.vy *= 0.9;   // 놓친 동안은 점점 느려지게
+        } else if (lost > (p.down ? HAND_LOST_MS : 150)) {
+          p.visible = false;
+          if (p.down) pinchEnd(p);
+        }
       }
     }
 
-    function trackHand(p, f, dt) {
+    function trackHand(p, f, t) {
       p.seen = true;
-      p.miss = 0;
-      // 살짝 부드럽게 따라가기 (손 떨림 줄이기)
-      const k = p.visible ? 0.5 : 1;
+      const since = (t - p.lastT) / 1000;
+      // 살짝 부드럽게 따라가기 (손 떨림 줄이기), 집고 있을 땐 더 바짝 따라감
+      const k = !p.visible ? 1 : p.down ? 0.75 : 0.5;
       const nx = p.x + (f.x - p.x) * k, ny = p.y + (f.y - p.y) * k;
-      if (dt > 0 && p.visible) {
-        p.vx = p.vx * 0.6 + ((nx - p.x) / dt) * 0.4;
-        p.vy = p.vy * 0.6 + ((ny - p.y) / dt) * 0.4;
-      } else { p.vx = 0; p.vy = 0; }
+      if (p.visible && since > 0 && since < 0.3) {
+        p.vx = p.vx * 0.5 + ((nx - p.x) / since) * 0.5;
+        p.vy = p.vy * 0.5 + ((ny - p.y) / since) * 0.5;
+      } else if (!p.visible) { p.vx = 0; p.vy = 0; }
       p.x = nx; p.y = ny;
+      p.lastT = t;
       p.gap = f.gap;
       p.visible = true;
       if (!p.down && f.gap < PINCH_ON) pinchStart(p);
-      else if (p.down && f.gap > PINCH_OFF) pinchEnd(p);
+      else if (p.down) {
+        // 흔들려서 손가락 거리가 한두 번 튀어도 놓지 않게: 연속으로 벌어져 있어야 놓음
+        p.openCount = f.gap > PINCH_OFF ? (p.openCount || 0) + 1 : 0;
+        if (p.openCount >= RELEASE_FRAMES) { p.openCount = 0; pinchEnd(p); }
+      }
     }
 
     // 손가락 사이에서 가장 가까운, 아무도 안 잡은 불똥이
