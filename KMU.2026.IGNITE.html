@@ -1112,7 +1112,13 @@
           const tx = h.x + h.offX, ty = h.y + h.offY;
           this.swing = (this.swing || 0) * 0.85 + (tx - this.x) * 0.004;
           this.x = tx; this.y = ty;
-          this.hop += dt * 4;
+          // 돌아서던 중이나 졸던 중에 잡혀도 납작하게 멈춰 있지 않게: 마저 돌아서고, 깨어나고, 쉬던 건 풀림
+          const ease = reduceMotion ? 1 : Math.min(1, dt * 10);
+          const face = Math.sign(this.face || 1);
+          this.face += (face - this.face) * ease; this.faceTarget = face;
+          this.nod += (0 - this.nod) * ease;
+          this.amp += (1 - this.amp) * ease;
+          this.rest = null; this.restIn = null;
           return;
         }
         // 손 반응: 가까이 온 손 쪽으로 다가가거나(반가워함) 반대로 도망 (잡을 수 있는 위치면 천천히 → 잡기 쉽게)
@@ -1255,7 +1261,8 @@
         this.lastLift = lift;   // 불티가 지금 머리 위치에서 나오도록 기억
         // 졸 땐 숨 쉬듯 천천히 부풀었다 줄어듦
         const breathe = reduceMotion ? 0 : Math.sin(this.age * 2.2) * 0.03 * this.nod;
-        const squash = (this.held ? 1 / (1 + Math.sin(this.hop) * 0.04) : 1 + (entering ? 0 : (1 - s) * 0.08 * this.amp)) * (1 - breathe);
+        // 들고 있을 땐 모양 그대로 (대롱대롱은 기울기로만)
+        const squash = this.held ? 1 : (1 + (entering ? 0 : (1 - s) * 0.08 * this.amp)) * (1 - breathe);
 
         // 불똥이는 정면을 보고 있으니 좌우 반전 대신 가는 방향으로 살짝 기울임
         // 잡을 수 있을 때 살짝 들리고(hover), 집으면 더 커짐 — visionOS의 들어 올림 느낌
