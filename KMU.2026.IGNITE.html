@@ -166,6 +166,9 @@
     const MARGIN = 0.15;         // 틀 바깥으로 얼마나 더 보고 판단할지 (틀 크기 비율)
     const COVER_OK = 0.72;       // 틀 안이 불똥이로 이만큼 차 있어야 함 (조금 비뚤어져도 인식되게)
     const SPILL_MAX = 0.8;       // 틀 밖으로 삐져나온 부분은 이만큼까지만 (불똥이를 든 손은 괜찮고, 배경·벽이 통째로 잡히는 건 거름)
+    const HINT_COVER = 0.6;      // 이만큼 채웠는데 넘치면 "멀리" 안내
+    const HINT_SMALL = 0.25;     // 이만큼은 채웠는데 부족하면 "가까이" 안내
+    const HINT_BG_SPILL = 1.2;   // 넘침이 이보다 크면 배경이 통째로 잡힌 걸로 보고 안내 안 함
     const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 "인식됨"
     const DETECT_INTERVAL_MS = 120; // 불똥이 인식 간격 (길수록 화면이 덜 끊기지만 인식이 조금 느려짐)
     const STAGE_MAX_DPR = 1.25;  // 캔버스 최대 배율 (레티나에서 낮출수록 가벼움, 글자·버튼은 HTML이라 그대로 선명)
@@ -534,6 +537,7 @@
       wk.onmessage = e => {
         const r = pending.get(e.data.id);
         pending.delete(e.data.id);
+        if (e.data.message) console.warn('작업 공간 인식 오류', e.data.message);
         if (r) r(e.data.masks || []);
       };
       return {
@@ -544,18 +548,30 @@
       };
     }
 
-    async function loadModels() {
-      const vision = await FilesetResolver.forVisionTasks(WASM);
-      try {
-        segWorker = await startSegWorker();
-      } catch (e) {
-        // 작업 공간을 못 쓰는 브라우저면 예전처럼 화면과 같은 곳에서 계산
-        console.warn('작업 공간 대신 화면에서 직접 인식할게요', e);
+    // 화면 쪽에서 직접 돌리는 인식 AI로 바꾸기 (작업 공간을 못 쓰거나 거기서 계속 실패할 때)
+    let workerFails = 0, switching = null;
+    function switchToMainSegmenter() {
+      if (switching) return switching;
+      console.warn('작업 공간 대신 화면에서 직접 인식할게요');
+      switching = (async () => {
+        const vision = await FilesetResolver.forVisionTasks(WASM);
         const make = (delegate) => InteractiveSegmenter.createFromOptions(vision, {
           baseOptions: { modelAssetPath: SEG_MODEL, delegate },
           outputCategoryMask: true, outputConfidenceMasks: false
         });
         try { segmenter = await make('GPU'); } catch (e2) { segmenter = await make('CPU'); }
+        segWorker = null;
+      })();
+      return switching;
+    }
+
+    async function loadModels() {
+      const vision = await FilesetResolver.forVisionTasks(WASM);
+      try {
+        segWorker = await startSegWorker();
+      } catch (e) {
+        console.warn('작업 공간을 쓸 수 없어요', e);
+        await switchToMainSegmenter();
       }
 
       // 손 인식은 실패해도 사진 인식은 계속 되게 따로
@@ -784,6 +800,12 @@
       let raws;
       if (segWorker) {
         raws = await segWorker.segment(await createImageBitmap(work), PROBE_POINTS);
+        // 작업 공간에서 계속 결과가 비어 오면(브라우저가 거기서 AI를 못 돌림) 화면 쪽 AI로 바꿈
+        if (!raws.some(Boolean)) {
+          if (++workerFails >= 3) await switchToMainSegmenter();
+          return false;
+        }
+        workerFails = 0;
       } else {
         raws = PROBE_POINTS.map(([px, py]) => {
           let a = null;
@@ -811,6 +833,16 @@
       }
       lastInfo = best;
       return !!(best && best.ok);
+    }
+
+    // 인식이 안 될 때 안내 문구
+    //  - 틀을 거의 채웠는데 바깥으로 많이 넘침 → 불똥이가 틀보다 큼 → 조금 멀리
+    //  - 틀 안에 있는데 덜 채움 → 불똥이가 틀보다 작음 → 조금 가까이
+    //  - 틀 주변이 통째로 잡힘(벽·배경) 또는 아무것도 없음 → 기본 안내
+    function distanceHint(info) {
+      if (info && info.cover >= HINT_COVER && info.spill > SPILL_MAX && info.spill < HINT_BG_SPILL) return '조금 더 멀리서 틀에 맞춰주세요';
+      if (info && info.cover >= HINT_SMALL && info.cover < COVER_OK && info.spill <= SPILL_MAX) return '조금 더 가까이 와서 틀에 맞춰주세요';
+      return '불똥이를 틀에 맞춰주세요';
     }
 
     // Space: 틀 띄우기 / 숨기기 (틀이 떠 있을 때만 인식)
@@ -1244,7 +1276,9 @@
             inside = false;
             stableCount = 0;
             readyAt = 0;
-            if (!armed) { armed = true; status.textContent = '불똥이를 틀에 맞춰주세요'; }
+            if (!armed) armed = true;
+            // 왜 인식이 안 되는지 Face ID처럼 짧게 안내 (틀보다 크면 멀리, 작으면 가까이)
+            status.textContent = distanceHint(lastInfo);
           }
 
           if (armed && inside) {
