@@ -152,6 +152,7 @@
     const EXCLUDE = /iphone|android|phone|continuity|link|droidcam|iriun|epoccam|virtual|obs|camo/i;
 
     const MAX_SPRITES = 10;      // 화면에 동시에 뛰어다니는 불똥이 수
+    const SPRITE_H = 0.133;      // 뛰어다니는 불똥이 키 (화면 높이 비율, 마리마다 최대 30% 더 큼)
     const GUIDE_H = 0.275;       // 화면에 보이는 불똥이 틀의 키 (화면 높이 비율)
     const GUIDE_COLOR = '#FE3636';               // 불똥이 틀 테두리 색
     // 스캔 장면 (Face ID 등록 화면 참고)
@@ -906,7 +907,7 @@
     class Sprite {
       constructor(img, x, y, h0) {
         this.img = img;
-        this.h = innerHeight * (0.2 + Math.random() * 0.06);
+        this.h = innerHeight * SPRITE_H * (1 + Math.random() * 0.3);   // 마리마다 크기가 살짝 다르게
         this.w = this.h * img.width / img.height;
         this.h0 = h0 || this.h;
         this.x = x; this.y = y;
