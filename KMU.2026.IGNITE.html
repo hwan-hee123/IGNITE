@@ -148,7 +148,7 @@
   </div>
 
   <script type="module">
-    import { FilesetResolver, InteractiveSegmenter, HandLandmarker }
+    import { FilesetResolver, InteractiveSegmenter, HandLandmarker, FaceDetector }
       from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
 
     // 휴대폰/가상 카메라로 잡히는 장치 이름 (노트북 카메라만 쓰기 위해 제외)
@@ -177,6 +177,13 @@
     const HINT_SMALL = 0.25;     // 이만큼은 채웠는데 부족하면 "가까이" 안내
     const HINT_BG_SPILL = 1.2;   // 넘침이 이보다 크면 배경이 통째로 잡힌 걸로 보고 안내 안 함
     const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 "인식됨"
+    // 이스터에그: 틀에 사람 얼굴이 들어오면 불똥이가 달려가 틀을 날려버림 (false로 바꾸면 완전히 꺼짐, 얼굴 AI도 안 불러옴)
+    const FACE_KNOCK = true;
+    const FACE_HOLD_MS = 1200;   // 얼굴이 이만큼 계속 보여야 출동 (불똥이를 얼굴 앞에 잠깐 든 건 무시)
+    const FACE_COOLDOWN_MS = 10000; // 한 번 날린 뒤 이만큼은 쉼
+    const KNOCK_RUN = 2.6;       // 출동할 때 달리는 빠르기 배율
+    const KNOCK_WINDUP_S = 0.28; // 웅크렸다 튀어나가기 전 시간
+    const KNOCK_PROUD_S = 1.4;   // 날려버린 뒤 뿌듯하게 뛰는 시간
     const DETECT_INTERVAL_MS = 120; // 불똥이 인식 간격 (길수록 화면이 덜 끊기지만 인식이 조금 느려짐)
     const STAGE_MAX_DPR = 1.25;  // 캔버스 최대 배율 (레티나에서 낮출수록 가벼움, 글자·버튼은 HTML이라 그대로 선명)
     const CAPTURE_DELAY_MS = 500; // 인식된 뒤 실제로 찍기까지 기다리는 시간
@@ -259,6 +266,7 @@
     const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
     const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite';
     const HAND_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+    const FACE_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite';
 
     const PINCH_ON = 0.35;       // 엄지-검지 거리가 손 크기의 이 비율보다 가까우면 "집음"
     const PINCH_OFF = 0.6;       // 이보다 멀어지면 "놓음" (중간은 이전 상태 유지 → 덜 끊김)
@@ -362,6 +370,10 @@
     let stableCount = 0;
     let armed = true;            // 불똥이를 틀에서 뺐다가 다시 넣어야 다음 인식
     let missCount = 0;
+    let faceDet = null;          // 얼굴 감지 AI (이스터에그용)
+    let faceSince = 0, faceMiss = 0, lastKnockAt = -1e9;
+    let knock = null;            // 출동 중: { sprite, phase: 'run'|'windup'|'proud', t, side }
+    let flyFrame = null;         // 날아가는 틀
     let blink = 0;               // 찍힘 신호 진행 (1 → 0)
     let closeFade = 1;           // 틀 자동 닫기 직전 옅어짐 (1 → 0)
     let glow = 0;                // 유리 가장자리 주황빛 (0~1)
@@ -648,6 +660,13 @@
       catch (e) {
         try { hands = await makeHands('CPU'); } catch (e2) { console.error('손 인식을 불러오지 못했어요', e2); }
       }
+      if (FACE_KNOCK) {
+        const makeFace = (delegate) => FaceDetector.createFromOptions(vision, {
+          baseOptions: { modelAssetPath: FACE_MODEL, delegate }, runningMode: 'IMAGE', minDetectionConfidence: 0.6
+        });
+        try { faceDet = await makeFace('GPU'); }
+        catch (e) { try { faceDet = await makeFace('CPU'); } catch (e2) { console.warn('얼굴 감지를 불러오지 못했어요 (이스터에그만 꺼짐)', e2); } }
+      }
     }
 
     // ---------- 엄지·검지 핀치로 불똥이 잡기 ----------
@@ -763,7 +782,7 @@
     function grabbable(p) {
       let best = null, bestD = Infinity;
       for (const s of sprites) {
-        if (s.holder || s.thrown || s.fadeT != null) continue;   // 이미 잡혔거나, 날아가거나, 꺼지는 중이면 못 잡음
+        if (s.holder || s.thrown || s.fadeT != null || (knock && knock.sprite === s)) continue;   // 출동 중이거나, 이미 잡혔거나, 날아가거나, 꺼지는 중이면 못 잡음
         if (s.age < s.liftTime() + ENTER_SHRINK_S) continue;      // 막 튀어나오는 중이면 못 잡음
         const d = Math.hypot(p.x - s.x, p.y - (s.y - s.h * 0.5));
         if (d < s.h * GRAB_RADIUS && d < bestD) { best = s; bestD = d; }
@@ -1120,7 +1139,8 @@
         const settled = this.age >= this.liftTime() + ENTER_SHRINK_S;
         let goT = 1, handNear = null, best = HAND_REACT_R * innerHeight;
         const cy = this.y - this.h * 0.5;
-        if (settled) for (const p of pinches) {
+        const myKnock = knock && knock.sprite === this ? knock : null;
+        if (settled && !myKnock) for (const p of pinches) {
           if (!p.visible || p.sprite) continue;
           const d = Math.hypot(p.x - this.x, p.y - cy);
           if (d < best) { best = d; handNear = p; }
@@ -1166,6 +1186,27 @@
           else this.rest = 'doze';
         }
         if (this.rest) goT = 0;
+        if (knock && settled) {
+          const g = guideBox(), fx = g.x + g.w / 2;
+          if (myKnock) {
+            if (knock.phase === 'run') {
+              // 틀 옆으로 전력 질주 (방향은 부드럽게)
+              const dx = knock.tx - this.x, dy = knock.ty - this.y, d = Math.hypot(dx, dy) || 1;
+              const kk = reduceMotion ? 1 : Math.min(1, dt * 8);
+              const nx = this.vx + (dx / d - this.vx) * kk, ny = this.vy + (dy / d - this.vy) * kk, n = Math.hypot(nx, ny) || 1;
+              this.vx = nx / n; this.vy = ny / n;
+              goT = Math.min(KNOCK_RUN, d / 60 + 0.3); hopT = 1.5;
+            } else {
+              goT = 0; hopT = knock.phase === 'proud' ? 1.6 : 1;
+              this.faceTarget = fx < this.x ? -1 : 1;
+            }
+            this.turnIn = Math.max(this.turnIn, 0.4);
+          } else if (!this.holder) {
+            // 나머지는 멈춰서 틀 쪽을 보며 응원하듯 콩콩
+            goT = 0; hopT = 1.2;
+            this.faceTarget = fx < this.x ? -1 : 1;
+          }
+        }
         const ease = reduceMotion ? 1 : Math.min(1, dt * (goT > this.go ? 4 : 2.5));
         this.go += (goT - this.go) * ease;
         this.hopBoost = (this.hopBoost ?? 1) + (hopT - (this.hopBoost ?? 1)) * ease;
@@ -1202,7 +1243,7 @@
         this.swing = (this.swing || 0) * 0.9;
 
         // 가는 방향이 확실히 바뀌었을 때만 돌아섬 (위아래로만 갈 땐 그대로 → 덜 깜빡임)
-        if (this.rest) { /* 쉬는 중엔 방향 그대로 (쳐다보기는 위에서 정함) */ }
+        if (this.rest || (knock && (knock.sprite !== this || knock.phase !== 'run'))) { /* 쉬거나 틀 쪽을 보는 중엔 방향 그대로 */ }
         else if (this.vx > TURN_THRESHOLD) this.faceTarget = 1;
         else if (this.vx < -TURN_THRESHOLD) this.faceTarget = -1;
         // 휙 뒤집지 않고 몸을 돌리듯 짧게 (HIG: 갑작스러운 변화 대신 자연스러운 전환, '동작 줄이기'면 바로)
@@ -1256,7 +1297,8 @@
         this.lastLift = lift;   // 불티가 지금 머리 위치에서 나오도록 기억
         // 졸 땐 숨 쉬듯 천천히 부풀었다 줄어듦
         const breathe = reduceMotion ? 0 : Math.sin(this.age * 2.2) * 0.03 * this.nod;
-        const squash = (this.held ? 1 / (1 + Math.sin(this.hop) * 0.04) : 1 + (entering ? 0 : (1 - s) * 0.08 * this.amp)) * (1 - breathe);
+        const crouch = this.crouch || 0;   // 박치기 전 웅크림
+        const squash = (1 + 0.22 * crouch) * (this.held ? 1 / (1 + Math.sin(this.hop) * 0.04) : 1 + (entering ? 0 : (1 - s) * 0.08 * this.amp)) * (1 - breathe);
 
         // 불똥이는 정면을 보고 있으니 좌우 반전 대신 가는 방향으로 살짝 기울임
         // 잡을 수 있을 때 살짝 들리고(hover), 집으면 더 커짐 — visionOS의 들어 올림 느낌
@@ -1676,11 +1718,115 @@
       osc.stop(t + 0.2);
     }
 
+    // ---------- 이스터에그: 틀에 얼굴 → 불똥이가 달려가 틀을 날려버림 ----------
+
+    // 틀 안(방금 잘라 본 영역)에 얼굴이 FACE_HOLD_MS 동안 계속 있고, 불똥이로는 인식이 안 되면 출동
+    function checkFace(ok) {
+      if (!faceDet || ok || inside || stableCount > 0) { faceSince = 0; return; }
+      let face = false;
+      try {
+        const r = faceDet.detect(work);
+        face = r.detections.some(d => {
+          const b = d.boundingBox, cx = (b.originX + b.width / 2) / work.width, cy = (b.originY + b.height / 2) / work.height;
+          return cx > 0.2 && cx < 0.8 && cy > 0.15 && cy < 0.85;   // 틀 가운데쯤에 있는 얼굴만
+        });
+      } catch (e) { return; }
+      const now = performance.now();
+      if (face) { faceMiss = 0; if (!faceSince) faceSince = now; }
+      else if (++faceMiss >= 3) faceSince = 0;   // 잠깐 놓친 건 봐줌
+      if (faceSince && now - faceSince >= FACE_HOLD_MS && now - lastKnockAt >= FACE_COOLDOWN_MS) {
+        faceSince = 0;
+        startKnock();
+      }
+    }
+
+    // 가장 큰 불똥이(대장)가 출동. 불똥이가 없거나 '동작 줄이기'면 틀만 조용히 닫힘
+    function startKnock() {
+      lastKnockAt = performance.now();
+      const g = guideBox(), cx = g.x + g.w / 2;
+      const free = sprites.filter(s => !s.holder && !s.thrown && s.fadeT == null && s.age > s.liftTime() + ENTER_SHRINK_S);
+      if (!free.length || reduceMotion) { setGuide(false); return; }
+      const sprite = free.reduce((a, b) => (b.h > a.h ? b : a));
+      knock = { sprite, phase: 'run', t: 0, side: sprite.x < cx ? -1 : 1 };
+    }
+
+    // 출동 순서: 틀 옆으로 달려감 → 웅크림 → 박치기(틀이 빙글 날아감) → 뿌듯하게 콩콩
+    function updateKnock(dt) {
+      if (!knock) return;
+      const k = knock, s = k.sprite, g = guideBox();
+      k.t += dt;
+      if (s.gone || s.holder || s.thrown || s.fadeT != null || (k.phase !== 'proud' && !guideOn)) {
+        s.crouch = 0; knock = null; return;   // 잡히거나 사라지거나 그새 불똥이가 찍히면 취소
+      }
+      if (k.phase === 'run') {
+        k.tx = g.x + g.w / 2 + k.side * (g.w * 0.5 + s.w * 0.3);
+        k.ty = Math.min(innerHeight - 20, g.y + g.h);
+        if (Math.hypot(k.tx - s.x, k.ty - s.y) < 14 || k.t > 3) { k.phase = 'windup'; k.t = 0; }
+      } else if (k.phase === 'windup') {
+        s.crouch = Math.min(1, k.t / KNOCK_WINDUP_S);
+        if (k.t >= KNOCK_WINDUP_S) {
+          // 박치기!
+          s.crouch = 0;
+          s.wake = 1;   // 깜짝 뛰기 동작을 그대로 써서 튀어오름
+          const hx = g.x + g.w / 2 + k.side * g.w * 0.45, hy = g.y + g.h * 0.75;
+          spark(hx, hy, 26, { angle: Math.PI / 2 + k.side * Math.PI / 2 + Math.PI, spread: 1.6, vMin: 200, vMax: 520, dur: 0.45, lw: 2, palette: s.palette });
+          flyFrame = {
+            x: g.x + g.w / 2, y: g.y + g.h / 2, w: g.w, h: g.h, rot: 0,
+            vx: -k.side * innerWidth * 0.75, vy: -innerHeight * 0.9, vr: -k.side * 9
+          };
+          playKnockSound();
+          setGuide(false);
+          k.phase = 'proud'; k.t = 0;
+        }
+      } else if (k.t >= KNOCK_PROUD_S) {
+        knock = null;
+      }
+    }
+
+    // 날아가는 틀: 빙글 돌며 포물선으로 날아가 화면 밖에서 작은 폭죽
+    function updateFlyFrame(dt) {
+      const f = flyFrame;
+      if (!f) return;
+      f.x += f.vx * dt; f.y += f.vy * dt; f.vy += innerHeight * 2 * dt; f.rot += f.vr * dt;
+      const r = Math.max(f.w, f.h) * 0.5;
+      if (f.x < -r || f.x > innerWidth + r || f.y > innerHeight + r) {
+        const ex = Math.min(innerWidth - 8, Math.max(8, f.x)), ey = Math.min(innerHeight - 8, Math.max(8, f.y));
+        const ix = f.x < 0 ? 1 : f.x > innerWidth ? -1 : 0, iy = f.y > innerHeight ? -1 : 0;
+        firework(ex, ey, f.w * 0.5, [[254, 54, 54], [255, 255, 255]], Math.atan2(iy || -0.3, ix || 0), Math.PI * 1.6, ix, iy);
+        flyFrame = null;
+        return;
+      }
+      const img = guideImages(f.w, f.h);
+      ctx.save();
+      ctx.translate(f.x, f.y);
+      ctx.rotate(f.rot);
+      ctx.globalAlpha = 0.9;
+      ctx.drawImage(highContrast ? img.whiteBold : img.white, -f.w / 2 - 6, -f.h / 2 - 6);
+      ctx.restore();
+    }
+
+    // 박치기 소리: 낮고 짧은 "퉁"
+    function playKnockSound() {
+      if (!CAPTURE_SOUND || !audio) return;
+      const t = audio.currentTime;
+      const osc = audio.createOscillator(), gain = audio.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(190, t);
+      osc.frequency.exponentialRampToValueAtTime(70, t + 0.16);
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(CAPTURE_SOUND_VOL * 2, t + 0.006);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+      osc.connect(gain).connect(audio.destination);
+      osc.start(t);
+      osc.stop(t + 0.24);
+    }
+
     async function detectLoop() {
       while (true) {
         if (guideOn && (segWorker || segmenter) && video.videoWidth) {
           let ok = false;
           try { ok = await checkGuide(); } catch (e) { console.error(e); }
+          if (!knock) checkFace(ok);
 
           if (ok) {
             missCount = 0;
@@ -2085,6 +2231,7 @@
     //  - 스캔이 진행될수록 아래(발)부터 위(불꽃 끝)로 #FE3636이 차오름 (경계는 부드럽게)
     //  - 다 차면 찍히고, 닫힐 때 불똥이 쪽으로 살짝 조여들며 사라짐
     function drawScanOutline(g) {
+      if (flyFrame) return;   // 틀이 날아가는 중
       const now = performance.now();
       const justCaptured = !guideOn && now - capturedAt < RELEASE_S * 1000 + 100;
       const progress = justCaptured ? 1 : glow;
@@ -2191,6 +2338,7 @@
       idleAll = now - lastActive > IDLE_S * 1000;
       // 집고 있는 불똥이는 맨 앞에
       sprites.sort((a, b) => (a.held - b.held) || (a.y - b.y));
+      updateKnock(dt);
       for (const s of sprites) s.update(dt);
       if (sprites.some(s => s.gone)) {
         for (const p of pinches) if (p.sprite && p.sprite.gone) p.sprite = null;
@@ -2201,6 +2349,7 @@
       drawPuffs();
       for (const s of sprites) s.drawShadow();
       for (const s of sprites) s.draw();
+      updateFlyFrame(dt);
       drawEmbers();
       drawSmoke();
       drawPinchCursors(dt);
