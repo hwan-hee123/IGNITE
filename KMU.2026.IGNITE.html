@@ -177,11 +177,14 @@
     const HINT_SMALL = 0.25;     // 이만큼은 채웠는데 부족하면 "가까이" 안내
     const HINT_BG_SPILL = 1.2;   // 넘침이 이보다 크면 배경이 통째로 잡힌 걸로 보고 안내 안 함
     const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 "인식됨"
-    // 이스터에그: 틀에 사람 얼굴이 들어오면 불똥이가 달려가 틀을 날려버림 (false로 바꾸면 완전히 꺼짐, 얼굴 AI도 안 불러옴)
+    // 이스터에그: 틀에 사람 얼굴이 들어오면 얼굴이 불똥이 모양으로 찍혀 뛰어다니고, 대장 불똥이가 쫓아가 날려버림
+    //  (false로 바꾸면 완전히 꺼짐, 얼굴 AI도 안 불러옴)
     const FACE_KNOCK = true;
     const FACE_HOLD_MS = 1200;   // 얼굴이 이만큼 계속 보여야 출동 (불똥이를 얼굴 앞에 잠깐 든 건 무시)
     const FACE_COOLDOWN_MS = 10000; // 한 번 날린 뒤 이만큼은 쉼
     const KNOCK_RUN = 2.6;       // 출동할 때 달리는 빠르기 배율
+    const FACE_SHOW_S = 1.2;     // 얼굴 불똥이가 혼자 뛰어다니는 시간 (그다음 대장 출동)
+    const FACE_ALONE_S = 4;      // 불똥이가 하나도 없으면 얼굴 불똥이는 이만큼 뛰다 조용히 꺼짐
     const KNOCK_WINDUP_S = 0.28; // 웅크렸다 튀어나가기 전 시간
     const KNOCK_PROUD_S = 1.4;   // 날려버린 뒤 뿌듯하게 뛰는 시간
     const DETECT_INTERVAL_MS = 120; // 불똥이 인식 간격 (길수록 화면이 덜 끊기지만 인식이 조금 느려짐)
@@ -372,8 +375,7 @@
     let missCount = 0;
     let faceDet = null;          // 얼굴 감지 AI (이스터에그용)
     let faceSince = 0, faceMiss = 0, lastKnockAt = -1e9;
-    let knock = null;            // 출동 중: { sprite, phase: 'run'|'windup'|'proud', t, side }
-    let flyFrame = null;         // 날아가는 틀
+    let knock = null;            // 출동: { sprite(대장), target(얼굴 불똥이), phase: 'wait'|'run'|'windup'|'proud', t, side }
     let blink = 0;               // 찍힘 신호 진행 (1 → 0)
     let closeFade = 1;           // 틀 자동 닫기 직전 옅어짐 (1 → 0)
     let glow = 0;                // 유리 가장자리 주황빛 (0~1)
@@ -782,7 +784,7 @@
     function grabbable(p) {
       let best = null, bestD = Infinity;
       for (const s of sprites) {
-        if (s.holder || s.thrown || s.fadeT != null || (knock && knock.sprite === s)) continue;   // 출동 중이거나, 이미 잡혔거나, 날아가거나, 꺼지는 중이면 못 잡음
+        if (s.holder || s.thrown || s.fadeT != null || s.isFace || (knock && knock.sprite === s)) continue;   // 출동 중이거나, 이미 잡혔거나, 날아가거나, 꺼지는 중이면 못 잡음
         if (s.age < s.liftTime() + ENTER_SHRINK_S) continue;      // 막 튀어나오는 중이면 못 잡음
         const d = Math.hypot(p.x - s.x, p.y - (s.y - s.h * 0.5));
         if (d < s.h * GRAB_RADIUS && d < bestD) { best = s; bestD = d; }
@@ -1140,7 +1142,7 @@
         let goT = 1, handNear = null, best = HAND_REACT_R * innerHeight;
         const cy = this.y - this.h * 0.5;
         const myKnock = knock && knock.sprite === this ? knock : null;
-        if (settled && !myKnock) for (const p of pinches) {
+        if (settled && !myKnock && !this.isFace) for (const p of pinches) {
           if (!p.visible || p.sprite) continue;
           const d = Math.hypot(p.x - this.x, p.y - cy);
           if (d < best) { best = d; handNear = p; }
@@ -1165,7 +1167,7 @@
           this.turnIn = Math.max(this.turnIn, 0.4);
         }
         // 한동안 아무도 없으면 차례로 쉼 (졸거나 옆 불똥이 쳐다보기) → 손이나 틀이 나타나면 깜짝 깨어남
-        if (idleAll && !handNear && settled) {
+        if (idleAll && !handNear && settled && !this.isFace) {
           if (!this.rest) {
             this.restIn = (this.restIn ?? Math.random() * 4) - dt;
             if (this.restIn <= 0) this.rest = Math.random() < 0.5 ? 'doze' : 'look';
@@ -1186,11 +1188,11 @@
           else this.rest = 'doze';
         }
         if (this.rest) goT = 0;
-        if (knock && settled) {
-          const g = guideBox(), fx = g.x + g.w / 2;
+        if (knock && settled && knock.phase !== 'wait') {
+          const f = knock.target;
           if (myKnock) {
             if (knock.phase === 'run') {
-              // 틀 옆으로 전력 질주 (방향은 부드럽게)
+              // 얼굴 불똥이 옆으로 전력 질주 (방향은 부드럽게)
               const dx = knock.tx - this.x, dy = knock.ty - this.y, d = Math.hypot(dx, dy) || 1;
               const kk = reduceMotion ? 1 : Math.min(1, dt * 8);
               const nx = this.vx + (dx / d - this.vx) * kk, ny = this.vy + (dy / d - this.vy) * kk, n = Math.hypot(nx, ny) || 1;
@@ -1198,52 +1200,19 @@
               goT = Math.min(KNOCK_RUN, d / 60 + 0.3); hopT = 1.5;
             } else {
               goT = 0; hopT = knock.phase === 'proud' ? 1.6 : 1;
-              this.faceTarget = fx < this.x ? -1 : 1;
+              if (knock.phase === 'windup') this.faceTarget = f.x < this.x ? -1 : 1;
             }
             this.turnIn = Math.max(this.turnIn, 0.4);
-          } else if (!this.holder) {
-            // 나머지는 멈춰서 틀 쪽을 보며 응원하듯 콩콩
+          } else if (this === f) {
+            // 얼굴 불똥이: 쫓기는 동안 느릿느릿, 웅크리는 순간 얼어붙음
+            goT = knock.phase === 'run' ? 0.6 : 0;
+          } else if (!this.holder && knock.phase !== 'proud') {
+            // 나머지는 멈춰서 얼굴 불똥이 쪽을 보며 응원하듯 콩콩
             goT = 0; hopT = 1.2;
-            this.faceTarget = fx < this.x ? -1 : 1;
+            this.faceTarget = f.x < this.x ? -1 : 1;
           }
         }
-        const ease = reduceMotion ? 1 : Math.min(1, dt * (goT > this.go ? 4 : 2.5));
-        this.go += (goT - this.go) * ease;
-        this.hopBoost = (this.hopBoost ?? 1) + (hopT - (this.hopBoost ?? 1)) * ease;
-        const ampT = this.rest === 'doze' ? 0 : this.rest === 'look' ? 0.25 : 1;
-        this.amp += (ampT - this.amp) * ease;
-        this.nod += ((this.rest === 'doze' ? 1 : 0) - this.nod) * (reduceMotion ? 1 : Math.min(1, dt * 1.5));
-        if (this.wake > 0) this.wake = Math.max(0, this.wake - dt / 0.45);
-
-        this.turnIn -= dt;
-        if (this.turnIn <= 0) {
-          // 가끔 방향을 바꿔서 이리저리 돌아다니게
-          const a = Math.atan2(this.vy, this.vx) + (Math.random() - 0.5) * 2.4;
-          this.vx = Math.cos(a); this.vy = Math.sin(a);
-          this.turnIn = 1 + Math.random() * 2.5;
-        }
-        // 등장(떠오름 → 줄어듦) 동안은 제자리, 다 떠오르면 불꽃이 톡 터짐
-        const lifted = this.age >= this.liftTime();
-        if (lifted && !this.burst) { this.burst = true; spark(this.x, this.y - this.h0 * 0.5, 24); }
-        if (this.age < this.liftTime() + (reduceMotion ? 0 : ENTER_SHRINK_S)) return;
-        const go = this.go;
-        this.x += this.vx * this.speed * dt * go;
-        this.y += this.vy * this.speed * dt * go * 0.6;
-
-        const mx = this.w / 2, top = innerHeight * 0.25, bottom = innerHeight - 20;
-        if (this.x < mx) { this.x = mx; this.vx = Math.abs(this.vx); }
-        if (this.x > innerWidth - mx) { this.x = innerWidth - mx; this.vx = -Math.abs(this.vx); }
-        if (this.y < top) {
-          // 높은 곳에서 놓으면 바닥 쪽으로 떨어짐
-          this.fallV = (this.fallV || 0) + 2500 * dt;
-          this.y = Math.min(top, this.y + this.fallV * dt);
-          if (this.y >= top) { this.fallV = 0; this.vy = Math.abs(this.vy); puff(this.x, this.y, this.w * 1.4); }
-        }
-        if (this.y > bottom) { this.y = bottom; this.vy = -Math.abs(this.vy); }
-        this.swing = (this.swing || 0) * 0.9;
-
-        // 가는 방향이 확실히 바뀌었을 때만 돌아섬 (위아래로만 갈 땐 그대로 → 덜 깜빡임)
-        if (this.rest || (knock && (knock.sprite !== this || knock.phase !== 'run'))) { /* 쉬거나 틀 쪽을 보는 중엔 방향 그대로 */ }
+        if (this.rest || (knock && knock.phase !== 'wait' && knock.phase !== 'proud' && knock.sprite !== this && knock.target !== this) || (knock && knock.sprite === this && knock.phase === 'windup')) { /* 쉬거나 얼굴 불똥이를 보는 중엔 방향 그대로 */ }
         else if (this.vx > TURN_THRESHOLD) this.faceTarget = 1;
         else if (this.vx < -TURN_THRESHOLD) this.faceTarget = -1;
         // 휙 뒤집지 않고 몸을 돌리듯 짧게 (HIG: 갑작스러운 변화 대신 자연스러운 전환, '동작 줄이기'면 바로)
@@ -1680,7 +1649,7 @@
       sprites.push(new Sprite(cutout(), g.x + g.w / 2, g.y + g.h, g.h));
       // 너무 많으면 가장 오래된 것부터 정리 (누가 손에 들고 있는 건 빼고)
       // 너무 많으면 가장 오래된 것부터 차례로 불이 꺼지며 연기로 사라짐 (누가 손에 든 건 빼고)
-      const alive = sprites.filter(s => s.fadeT == null && !s.thrown);
+      const alive = sprites.filter(s => s.fadeT == null && !s.thrown && !s.isFace);
       let excess = alive.length - MAX_SPRITES;
       for (let i = 0, k = 0; excess > 0 && i < alive.length; i++) {
         if (alive[i].held) continue;
@@ -1740,69 +1709,61 @@
       }
     }
 
-    // 가장 큰 불똥이(대장)가 출동. 불똥이가 없거나 '동작 줄이기'면 틀만 조용히 닫힘
+    // 얼굴을 불똥이 모양으로 찍어서 뛰어다니게 함 → 잠시 뒤 가장 큰 불똥이(대장)가 쫓아가 날려버림
+    //  불똥이가 없거나 '동작 줄이기'면 얼굴 불똥이는 조금 뛰다 조용히 꺼짐
     function startKnock() {
       lastKnockAt = performance.now();
-      const g = guideBox(), cx = g.x + g.w / 2;
-      const free = sprites.filter(s => !s.holder && !s.thrown && s.fadeT == null && s.age > s.liftTime() + ENTER_SHRINK_S);
-      if (!free.length || reduceMotion) { setGuide(false); return; }
-      const sprite = free.reduce((a, b) => (b.h > a.h ? b : a));
-      knock = { sprite, phase: 'run', t: 0, side: sprite.x < cx ? -1 : 1 };
+      if (!video.videoWidth) return;
+      const g = guideBox();
+      const target = new Sprite(cutout(), g.x + g.w / 2, g.y + g.h, g.h);
+      target.isFace = true;
+      sprites.push(target);
+      blink = 1;
+      playCaptureSound();
+      setGuide(false);
+      const free = sprites.filter(s => !s.isFace && !s.holder && !s.thrown && s.fadeT == null && s.age > s.liftTime() + ENTER_SHRINK_S);
+      if (!free.length || reduceMotion) { target.fizzle(FACE_ALONE_S); return; }
+      knock = { sprite: free.reduce((a, b) => (b.h > a.h ? b : a)), target, phase: 'wait', t: 0, side: 1 };
     }
 
-    // 출동 순서: 틀 옆으로 달려감 → 웅크림 → 박치기(틀이 빙글 날아감) → 뿌듯하게 콩콩
+    // 출동 순서: 얼굴 불똥이가 잠깐 뛰어다님 → 대장이 쫓아감 → 옆에서 웅크림 → 박치기(얼굴 불똥이가 빙글 날아가 화면 밖에서 펑) → 뿌듯하게 콩콩
     function updateKnock(dt) {
       if (!knock) return;
-      const k = knock, s = k.sprite, g = guideBox();
+      const k = knock, s = k.sprite, f = k.target;
       k.t += dt;
-      if (s.gone || s.holder || s.thrown || s.fadeT != null || (k.phase !== 'proud' && !guideOn)) {
-        s.crouch = 0; knock = null; return;   // 잡히거나 사라지거나 그새 불똥이가 찍히면 취소
+      const lost = x => x.gone || x.holder || x.thrown || x.fadeT != null;
+      if (k.phase !== 'proud' && (lost(s) || lost(f))) {
+        // 대장이 잡히거나 사라지면 얼굴 불똥이는 조용히 꺼짐
+        s.crouch = 0; knock = null;
+        if (!lost(f)) f.fizzle(1);
+        return;
       }
-      if (k.phase === 'run') {
-        k.tx = g.x + g.w / 2 + k.side * (g.w * 0.5 + s.w * 0.3);
-        k.ty = Math.min(innerHeight - 20, g.y + g.h);
-        if (Math.hypot(k.tx - s.x, k.ty - s.y) < 14 || k.t > 3) { k.phase = 'windup'; k.t = 0; }
+      if (k.phase === 'wait') {
+        if (f.age > f.liftTime() + ENTER_SHRINK_S + FACE_SHOW_S) { k.phase = 'run'; k.t = 0; }
+      } else if (k.phase === 'run') {
+        k.side = s.x < f.x ? -1 : 1;   // 대장이 얼굴 불똥이의 어느 쪽에 있는지
+        k.tx = f.x + k.side * (f.w * 0.5 + s.w * 0.35);
+        k.ty = f.y;
+        if (Math.hypot(k.tx - s.x, k.ty - s.y) < 18 || k.t > 4) { k.phase = 'windup'; k.t = 0; }
       } else if (k.phase === 'windup') {
         s.crouch = Math.min(1, k.t / KNOCK_WINDUP_S);
         if (k.t >= KNOCK_WINDUP_S) {
-          // 박치기!
+          // 박치기! 얼굴 불똥이는 던진 것처럼 빙글 날아감 (화면 밖에서 기존 폭죽으로 터짐)
           s.crouch = 0;
           s.wake = 1;   // 깜짝 뛰기 동작을 그대로 써서 튀어오름
-          const hx = g.x + g.w / 2 + k.side * g.w * 0.45, hy = g.y + g.h * 0.75;
-          spark(hx, hy, 26, { angle: Math.PI / 2 + k.side * Math.PI / 2 + Math.PI, spread: 1.6, vMin: 200, vMax: 520, dur: 0.45, lw: 2, palette: s.palette });
-          flyFrame = {
-            x: g.x + g.w / 2, y: g.y + g.h / 2, w: g.w, h: g.h, rot: 0,
-            vx: -k.side * innerWidth * 0.75, vy: -innerHeight * 0.9, vr: -k.side * 9
-          };
+          const hx = f.x + k.side * f.w * 0.4, hy = f.y - f.h * 0.5;
+          spark(hx, hy, 26, { angle: k.side > 0 ? Math.PI : 0, spread: 1.6, vMin: 200, vMax: 520, dur: 0.45, lw: 2, palette: s.palette });
+          f.thrown = true;
+          f.tvx = -k.side * innerWidth * 0.8;
+          f.tvy = -innerHeight * 1.1;
+          f.spinV = -k.side * 10;
+          f.fallV = 0;
           playKnockSound();
-          setGuide(false);
           k.phase = 'proud'; k.t = 0;
         }
-      } else if (k.t >= KNOCK_PROUD_S) {
+      } else if (k.t >= KNOCK_PROUD_S || s.gone) {
         knock = null;
       }
-    }
-
-    // 날아가는 틀: 빙글 돌며 포물선으로 날아가 화면 밖에서 작은 폭죽
-    function updateFlyFrame(dt) {
-      const f = flyFrame;
-      if (!f) return;
-      f.x += f.vx * dt; f.y += f.vy * dt; f.vy += innerHeight * 2 * dt; f.rot += f.vr * dt;
-      const r = Math.max(f.w, f.h) * 0.5;
-      if (f.x < -r || f.x > innerWidth + r || f.y > innerHeight + r) {
-        const ex = Math.min(innerWidth - 8, Math.max(8, f.x)), ey = Math.min(innerHeight - 8, Math.max(8, f.y));
-        const ix = f.x < 0 ? 1 : f.x > innerWidth ? -1 : 0, iy = f.y > innerHeight ? -1 : 0;
-        firework(ex, ey, f.w * 0.5, [[254, 54, 54], [255, 255, 255]], Math.atan2(iy || -0.3, ix || 0), Math.PI * 1.6, ix, iy);
-        flyFrame = null;
-        return;
-      }
-      const img = guideImages(f.w, f.h);
-      ctx.save();
-      ctx.translate(f.x, f.y);
-      ctx.rotate(f.rot);
-      ctx.globalAlpha = 0.9;
-      ctx.drawImage(highContrast ? img.whiteBold : img.white, -f.w / 2 - 6, -f.h / 2 - 6);
-      ctx.restore();
     }
 
     // 박치기 소리: 낮고 짧은 "퉁"
@@ -2231,7 +2192,6 @@
     //  - 스캔이 진행될수록 아래(발)부터 위(불꽃 끝)로 #FE3636이 차오름 (경계는 부드럽게)
     //  - 다 차면 찍히고, 닫힐 때 불똥이 쪽으로 살짝 조여들며 사라짐
     function drawScanOutline(g) {
-      if (flyFrame) return;   // 틀이 날아가는 중
       const now = performance.now();
       const justCaptured = !guideOn && now - capturedAt < RELEASE_S * 1000 + 100;
       const progress = justCaptured ? 1 : glow;
@@ -2349,7 +2309,6 @@
       drawPuffs();
       for (const s of sprites) s.drawShadow();
       for (const s of sprites) s.draw();
-      updateFlyFrame(dt);
       drawEmbers();
       drawSmoke();
       drawPinchCursors(dt);
