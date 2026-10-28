@@ -203,9 +203,10 @@
     const THROW_GRAVITY = 1400;  // 던진 뒤 떨어지는 힘 (px/초²)
     const SMOKE_PUFFS = 9;       // 불이 꺼질 때 피어오르는 연기 덩어리 수
     const SMOKE_ALPHA = 0.32;    // 연기 진하기
+    const POP_S = 0.32;          // 폭죽으로 사라질 때 몸이 사라지는 시간(초)
     const FIZZLE_S = 0.6;        // 불이 꺼지며 사라지는 시간
     const CLEAR_STAGGER_S = 0.06; // 모두 지울 때 하나씩 꺼지는 간격
-    const OVERFLOW_STAGGER_S = 0.3; // 10마리 넘을 때 오래된 것부터 꺼지는 간격
+    const OVERFLOW_STAGGER_S = 0.3; // 10마리 넘을 때 오래된 것부터 폭죽으로 터지는 간격
     // 안내 문구 (HIG: 같은 동작은 같은 말로, 짧게) — 버튼 "불똥이 추가"와 안내 "불똥이를 추가하세요"를 맞춤
     const MSG_LOADING = '준비 중이에요';
     const MSG_IDLE = 'Space를 눌러 불똥이를 추가하세요';
@@ -953,9 +954,43 @@
 
     // ---------- 뛰어다니는 불똥이 ----------
 
+    // 찍힌 불똥이 그림에서 대표 색 2~3개를 뽑음 (폭죽 색으로 씀)
+    //  - 색깔이 있는 부분을 색상(hue)별로 모아 가장 많은 색부터
+    //  - 흰색·검정·회색 위주면 은빛/흰빛으로
+    //  - 폭죽은 빛이라 어두운 색은 밝고 선명하게 올림
+    function extractPalette(img) {
+      const S = 32, c = document.createElement('canvas');
+      c.width = c.height = S;
+      const g = c.getContext('2d', { willReadFrequently: true });
+      g.drawImage(img, 0, 0, S, S);
+      const d = g.getImageData(0, 0, S, S).data;
+      const bins = Array.from({ length: 12 }, () => ({ w: 0, r: 0, g: 0, b: 0 }));
+      let gray = 0, total = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] < 200) continue;
+        const r = d[i] / 255, gg = d[i + 1] / 255, b = d[i + 2] / 255;
+        const mx = Math.max(r, gg, b), mn = Math.min(r, gg, b), l = (mx + mn) / 2, s = mx === mn ? 0 : (mx - mn) / (1 - Math.abs(2 * l - 1));
+        total++;
+        if (s < 0.25 || l < 0.08 || l > 0.95) { gray++; continue; }
+        let h = mx === r ? ((gg - b) / (mx - mn)) % 6 : mx === gg ? (b - r) / (mx - mn) + 2 : (r - gg) / (mx - mn) + 4;
+        h = (h * 60 + 360) % 360;
+        const bin = bins[Math.floor(h / 30) % 12], w = s;
+        bin.w += w; bin.r += d[i] * w; bin.g += d[i + 1] * w; bin.b += d[i + 2] * w;
+      }
+      const vivid = (r, gg, b) => {   // 폭죽용으로 밝고 선명하게
+        const mx = Math.max(r, gg, b, 1), k = 255 / mx;
+        return [Math.round(Math.min(255, r * k * 0.95 + 20)), Math.round(Math.min(255, gg * k * 0.95 + 20)), Math.round(Math.min(255, b * k * 0.95 + 20))];
+      };
+      const cols = bins.filter(b => b.w > 0.02 * total).sort((a, b) => b.w - a.w).slice(0, 3)
+        .map(b => vivid(b.r / b.w, b.g / b.w, b.b / b.w));
+      if (!cols.length || gray > total * 0.75) cols.push([235, 238, 245], [190, 200, 215]);   // 흰·검정 불똥이 → 은빛 폭죽
+      return cols.slice(0, 3);
+    }
+
     class Sprite {
       constructor(img, x, y, h0) {
         this.img = img;
+        this.palette = extractPalette(img);
         this.h = innerHeight * SPRITE_H * (1 + Math.random() * 0.3);   // 마리마다 크기가 살짝 다르게
         this.w = this.h * img.width / img.height;
         this.h0 = h0 || this.h;
@@ -977,11 +1012,13 @@
         this.face = this.faceTarget;
       }
 
-      // 그 자리에서 불이 꺼지며 사라지기 (delay초 뒤 시작)
-      fizzle(delay = 0) {
+      // 그 자리에서 사라지기 (delay초 뒤 시작)
+      //  style 'firework': 자기 색으로 폭죽처럼 팡 터지며 사라짐 / 기본: 불이 조용히 꺼짐
+      fizzle(delay = 0, style) {
         if (this.fadeT != null) return;
         this.fadeT = 0;
         this.fadeDelay = delay;
+        this.fadeStyle = style;
       }
 
       update(dt) {
@@ -990,6 +1027,13 @@
         // 꺼지는 중: 잡고 있던 손은 놓고, 불이 작아지며 색이 빠지다 연기를 남기고 사라짐
         if (this.fadeT != null && (this.fadeDelay -= dt) <= 0) {
           if (this.holder) { this.holder.sprite = null; this.holder = null; }
+          if (this.fadeStyle === 'firework') {
+            // 터지는 순간 폭죽, 몸은 살짝 부풀며 빠르게 사라짐
+            if (!this.smoked) { this.smoked = true; firework(this.x, this.y - this.h * 0.5, this.w, this.palette, 0, Math.PI * 2); }
+            this.fadeT = Math.min(1, this.fadeT + dt / POP_S);
+            if (this.fadeT >= 1) this.gone = true;
+            return;
+          }
           this.fadeT = Math.min(1, this.fadeT + dt / FIZZLE_S);
           if (!this.smoked && this.fadeT > 0.35) {
             this.smoked = true;
@@ -1108,7 +1152,8 @@
         // 잡을 수 있을 때 살짝 들리고(hover), 집으면 더 커짐 — visionOS의 들어 올림 느낌
         // 꺼지는 중: 작아지고(동작 줄이기면 그대로) 투명해지며 색이 빠짐
         const fading = this.fadeT != null && this.fadeDelay <= 0 ? this.fadeT : 0;
-        const fadeScale = reduceMotion ? 1 : 1 - 0.3 * fading * fading;
+        const pop = this.fadeStyle === 'firework';
+        const fadeScale = reduceMotion ? 1 : pop ? 1 + 0.18 * Math.sin(Math.min(1, fading * 1.4) * Math.PI / 2) : 1 - 0.3 * fading * fading;
         const grabbed = (this.held ? 1.1 : 1 + 0.05 * this.hover) * fadeScale;
         const tilt = this.held ? -(this.swing || 0) : this.vx * 0.12 + Math.sin(this.hop * 2) * 0.05 - (this.swing || 0);
         ctx.save();
@@ -1133,7 +1178,7 @@
         }
         if (fading > 0) {
           ctx.globalAlpha = 1 - Math.pow(fading, 1.6);
-          ctx.filter = `grayscale(${fading}) brightness(${1 - 0.35 * fading})`;
+          ctx.filter = pop ? `brightness(${1 + 0.8 * fading})` : `grayscale(${fading}) brightness(${1 - 0.35 * fading})`;
         }
         ctx.drawImage(this.img, -this.w / 2, -this.h, this.w, this.h);
         ctx.restore();
@@ -1156,6 +1201,23 @@
     const SMOKE_SPRITE = radialSprite(128, [[0, 'rgba(200,200,205,1)'], [0.5, 'rgba(170,170,178,0.6)'], [1, 'rgba(160,160,168,0)']]);
     const GLOW_STEPS = 12;   // 불꽃 빛 색을 12단계로 미리 (막 튄 하양-노랑 → 식은 빨강)
     let glowSprites = null;
+    // 불똥이 색 폭죽용: 색마다 빛 그림을 한 번만 만들어 둠
+    const colorGlows = new Map();
+    function colorGlowSprite(col) {
+      const key = col.join();
+      if (!colorGlows.has(key)) {
+        const [r, g, b] = col;
+        colorGlows.set(key, radialSprite(32, [[0, `rgba(${r},${g},${b},1)`], [0.35, `rgba(${r},${g},${b},0.45)`], [1, `rgba(${r},${g},${b},0)`]]));
+      }
+      return colorGlows.get(key);
+    }
+    // 폭죽 불꽃 색: 막 터질 땐 하얗게 → 금방 불똥이 색으로
+    function particleColor(p, t, a) {
+      if (!p.col) return fireColor(t, a);
+      const k = Math.min(1, (1 - t) * 2.5), [r, g, b] = p.col;
+      return `rgba(${Math.round(255 + (r - 255) * k)}, ${Math.round(255 + (g - 255) * k)}, ${Math.round(255 + (b - 255) * k)}, ${a})`;
+    }
+
     function glowSprite(t) {
       if (!glowSprites) {
         glowSprites = [];
@@ -1183,13 +1245,14 @@
     }
 
     // 불티: 불꽃 끝에서 천천히 떠오르며 흔들리다 꺼짐 (하양-노랑 → 주황 → 빨강)
-    function ember(x, y) {
+    function ember(x, y, col) {
       if (reduceMotion || particles.length > PARTICLE_MAX) return;
       particles.push({
         kind: 'ember', x, y, vx: (Math.random() - 0.5) * 30, vy: -(50 + Math.random() * 60),
-        life: 1, dur: 0.9 + Math.random() * 0.6, r: 1.8 + Math.random() * 1.8, wob: Math.random() * 6.28
+        life: 1, dur: 0.9 + Math.random() * 0.6, r: 1.8 + Math.random() * 1.8, wob: Math.random() * 6.28, col
       });
     }
+    const pickColor = pal => pal && pal.length ? pal[Math.floor(Math.random() * pal.length)] : undefined;
 
     // 불꽃 튐: 짧은 빛줄기가 사방으로 탁 튀고 중력에 떨어지며 꺼짐 (착지, 튀어나올 때, 집을 때)
     function spark(x, y, count, o = {}) {
@@ -1198,13 +1261,29 @@
       const center = o.angle ?? -Math.PI / 2, spread = o.spread ?? 2.6;
       const vMin = o.vMin ?? 120, vMax = o.vMax ?? 300;
       for (let i = 0; i < n && particles.length < PARTICLE_MAX; i++) {
-        const a = center + (Math.random() - 0.5) * spread;
+        // ring: 폭죽처럼 고르게 퍼짐 / 아니면 무작위 방향
+        const a = o.ring ? center + ((i + Math.random() * 0.4) / n - 0.5) * spread : center + (Math.random() - 0.5) * spread;
         const v = vMin + Math.random() * (vMax - vMin);
         particles.push({
           kind: 'spark', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1,
-          dur: (o.dur ?? 0.35) + Math.random() * 0.25, lw: o.lw ?? 1.6
+          dur: (o.dur ?? 0.35) + Math.random() * 0.25, lw: o.lw ?? 1.6, col: pickColor(o.palette)
         });
       }
+    }
+
+    // 불똥이 색 폭죽: 가운데 빛 → 고르게 퍼지는 큰 불꽃 링 → 작은 불꽃 → 반짝이며 떨어지는 불티 → 옅은 연기
+    //  spread = 2π 면 사방(제자리에서 터질 때), 작으면 그 방향으로(화면 가장자리에서 터질 때)
+    function firework(x, y, w, palette, angle, spread, ix = 0, iy = 0) {
+      if (reduceMotion) return;
+      const k = BURST_SCALE;
+      particles.push({ kind: 'bloom', x, y, r: Math.max(innerWidth, innerHeight) * BURST_BLOOM * k, life: 1, dur: 0.55 + 0.15 * (k - 1), col: palette[0] });
+      spark(x, y, BURST_SPARKS * k, { angle, spread, ring: true, vMin: 420 * k, vMax: 560 * k, dur: 0.65, lw: 2.2 * k, palette });
+      spark(x, y, BURST_SPARKS * 0.6 * k, { angle, spread, vMin: 120 * k, vMax: 380 * k, dur: 0.7, lw: 1.4 * k, palette });
+      for (let i = 0; i < BURST_EMBERS * k; i++) {
+        const a = angle + (Math.random() - 0.5) * spread, r = w * (0.3 + Math.random() * 0.9) * k;
+        ember(x + Math.cos(a) * r, y + Math.sin(a) * r, pickColor(palette));
+      }
+      smoke(x, y, w * 1.2 * k, ix, iy, Math.round(SMOKE_PUFFS * k));
     }
 
     // 뛰어다닐 때 발밑: 가는 방향 반대쪽으로 작은 불꽃이 바닥을 스치듯 낮게 튐
@@ -1216,15 +1295,10 @@
     }
 
     // 던져서 화면 밖에서 터질 때: 그 자리에서 빛이 확 퍼지고, 불꽃이 사방으로 길게 터지고, 연기·불티가 피어오름
-    function burst(x, y, ix, iy, w) {
-      if (reduceMotion) return;
-      const k = BURST_SCALE;   // 터짐 세기 (빛 크기·불꽃 수·속도·굵기·연기 모두 같이 커짐)
-      particles.push({ kind: 'bloom', x, y, r: Math.max(innerWidth, innerHeight) * BURST_BLOOM * k, life: 1, dur: 0.55 + 0.15 * (k - 1) });
-      const inward = Math.atan2(iy || -0.3, ix || 0);   // 화면 안쪽으로 더 많이
-      spark(x, y, BURST_SPARKS * k, { angle: inward, spread: Math.PI * 1.6, vMin: 250 * k, vMax: 650 * k, dur: 0.5, lw: 2.2 * k });
-      spark(x, y, BURST_SPARKS * 0.5 * k, { angle: inward, spread: Math.PI * 2, vMin: 80 * k, vMax: 220 * k, dur: 0.6, lw: 1.4 * k });
-      for (let i = 0; i < BURST_EMBERS * k; i++) ember(x + (Math.random() - 0.5) * w * 0.6 * k, y + (Math.random() - 0.5) * w * 0.4 * k);
-      smoke(x, y, w * 1.5 * k, ix, iy, Math.round(SMOKE_PUFFS * 2 * k));
+    // 던져서 화면 가장자리에서 터질 때: 화면 안쪽으로 부채꼴 폭죽 (불똥이 색)
+    function burst(x, y, ix, iy, w, palette) {
+      const inward = Math.atan2(iy || -0.3, ix || 0);
+      firework(x, y, w, palette, inward, Math.PI * 1.6, ix, iy);
     }
 
     function updateParticles(dt) {
@@ -1261,7 +1335,7 @@
       // 화면 안쪽 방향 (연기가 가장자리에서 안으로 살짝 밀려 들어오게)
       const ix = s.x < 0 ? 1 : s.x > innerWidth ? -1 : 0;
       const iy = s.y - s.h / 2 < 0 ? 1 : s.y - s.h / 2 > innerHeight ? -1 : 0;
-      burst(ex, ey, ix, iy, s.w);
+      burst(ex, ey, ix, iy, s.w, s.palette);
     }
 
     // 연기 피우기: (ix, iy) 쪽으로 살짝 밀려나며 위로 피어오름
@@ -1317,10 +1391,13 @@
           // 터지는 빛: 그 자리에서 빠르게 커지며 옅어짐 (화면 전체가 번쩍이지 않게 그 자리만)
           const e = 1 - Math.pow(p.life, 2), r = p.r * (0.35 + 0.65 * e), a = Math.pow(p.life, 1.5) * 0.85;
           const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
-          g.addColorStop(0, `rgba(255, 236, 200, ${a})`);
-          g.addColorStop(0.25, `rgba(255, 150, 70, ${a * 0.7})`);
-          g.addColorStop(0.6, `rgba(254, 54, 54, ${a * 0.3})`);
-          g.addColorStop(1, 'rgba(254, 54, 54, 0)');
+          // 불똥이 색이 있으면 그 색으로 빛남 (가운데는 하얗게)
+          const [cr, cg, cb] = p.col || [254, 54, 54];
+          const [mr, mg, mb] = p.col || [255, 150, 70];
+          g.addColorStop(0, `rgba(255, 240, 220, ${a})`);
+          g.addColorStop(0.25, `rgba(${mr}, ${mg}, ${mb}, ${a * 0.7})`);
+          g.addColorStop(0.6, `rgba(${cr}, ${cg}, ${cb}, ${a * 0.3})`);
+          g.addColorStop(1, `rgba(${cr}, ${cg}, ${cb}, 0)`);
           ctx.fillStyle = g;
           ctx.beginPath();
           ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
@@ -1333,18 +1410,18 @@
         // 은은한 빛 (미리 그려둔 빛 그림을 깔아줌 — 예전 그림자 흐림과 같은 느낌)
         const halo = p.kind === 'spark' ? 9 + (p.lw || 1.6) * 2 : 9 + p.r * 2;
         ctx.globalAlpha = a * 0.8 * flick;
-        ctx.drawImage(glowSprite(t), p.x - halo, p.y - halo, halo * 2, halo * 2);
+        ctx.drawImage(p.col ? colorGlowSprite(p.col) : glowSprite(t), p.x - halo, p.y - halo, halo * 2, halo * 2);
         ctx.globalAlpha = 1;
         if (p.kind === 'spark') {
           // 움직이는 방향으로 짧은 빛줄기
-          ctx.strokeStyle = fireColor(t, a);
+          ctx.strokeStyle = particleColor(p, t, a);
           ctx.lineWidth = p.lw || 1.6;
           ctx.beginPath();
           ctx.moveTo(p.x, p.y);
           ctx.lineTo(p.x - p.vx * 0.035, p.y - p.vy * 0.035);
           ctx.stroke();
         } else {
-          ctx.fillStyle = fireColor(t, a * flick);
+          ctx.fillStyle = particleColor(p, t, a * flick);
           ctx.beginPath();
           ctx.arc(p.x, p.y, p.r * (0.5 + 0.5 * t), 0, Math.PI * 2);
           ctx.fill();
@@ -1386,7 +1463,7 @@
       let excess = alive.length - MAX_SPRITES;
       for (let i = 0, k = 0; excess > 0 && i < alive.length; i++) {
         if (alive[i].held) continue;
-        alive[i].fizzle(k++ * OVERFLOW_STAGGER_S);
+        alive[i].fizzle(k++ * OVERFLOW_STAGGER_S, 'firework');
         excess--;
       }
       blink = 1;
