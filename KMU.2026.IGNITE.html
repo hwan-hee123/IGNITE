@@ -167,6 +167,7 @@
     const SPILL_MAX = 0.4;       // 틀 밖으로 삐져나온 부분은 이만큼까지만 (배경·벽이 통째로 잡히는 것 거르기)
     const STABLE_NEEDED = 4;     // 연속으로 이만큼 들어와 있으면 "인식됨"
     const DETECT_INTERVAL_MS = 120; // 불똥이 인식 간격 (길수록 화면이 덜 끊기지만 인식이 조금 느려짐)
+    const STAGE_MAX_DPR = 1.25;  // 캔버스 최대 배율 (레티나에서 낮출수록 가벼움, 글자·버튼은 HTML이라 그대로 선명)
     const CAPTURE_DELAY_MS = 500; // 인식된 뒤 실제로 찍기까지 기다리는 시간
     // 스캔 진행은 유리가 아니라 틀 색이 아래→위로 차오르는 걸로 보여줌 (유리는 그대로)
     const SCAN_FROST = 0;        // 스캔 중 유리가 더 흐려지는 정도
@@ -268,7 +269,8 @@
     const work = document.createElement('canvas');
     const wctx = work.getContext('2d', { willReadFrequently: true });
 
-    let segmenter = null;
+    let segmenter = null;        // 화면과 같은 곳에서 돌리는 인식 AI (작업 공간을 못 쓸 때만)
+    let segWorker = null;        // 별도 작업 공간에서 돌리는 인식 AI
     let hands = null;
     let lastHandTime = -1;
     // 핀치 커서 (화면 좌표). sprite = 지금 집고 있는 불똥이
@@ -481,7 +483,7 @@
           catch (e) { track = await openCamera(); }   // 실패하면 기본 카메라 유지
         }
         camSelect.value = track.getSettings().deviceId;
-        if (segmenter) status.textContent = 'Space를 눌러 불똥이를 추가해보세요';
+        if (segmenter || segWorker) status.textContent = 'Space를 눌러 불똥이를 추가해보세요';
       } catch (err) {
         status.textContent = CAMERA_ERRORS[err.name] || ('카메라 오류: ' + err.name + ' ' + err.message);
       }
@@ -498,13 +500,46 @@
 
     // ---------- AI 모델 ----------
 
+    // 불똥이 인식 AI를 별도 작업 공간(Web Worker)에서 돌림 → AI가 계산하는 동안에도 화면이 멈추지 않음
+    async function startSegWorker() {
+      const wk = new Worker('seg-worker.js?v=' + Date.now(), { type: 'module' });
+      await new Promise((ok, no) => {
+        const timer = setTimeout(() => no(new Error('시간 초과')), 30000);
+        wk.onmessage = e => {
+          if (e.data.type === 'ready') { clearTimeout(timer); ok(); }
+          else if (e.data.type === 'error') { clearTimeout(timer); no(new Error(e.data.message)); }
+        };
+        wk.onerror = e => { clearTimeout(timer); no(new Error(e.message)); };
+        wk.postMessage({ type: 'init', wasm: WASM, model: SEG_MODEL });
+      });
+      const pending = new Map();
+      let nextId = 1;
+      wk.onmessage = e => {
+        const r = pending.get(e.data.id);
+        pending.delete(e.data.id);
+        if (r) r(e.data.masks || []);
+      };
+      return {
+        segment(bitmap, points) {
+          const id = nextId++;
+          return new Promise(res => { pending.set(id, res); wk.postMessage({ type: 'segment', id, bitmap, points }, [bitmap]); });
+        }
+      };
+    }
+
     async function loadModels() {
       const vision = await FilesetResolver.forVisionTasks(WASM);
-      const make = (delegate) => InteractiveSegmenter.createFromOptions(vision, {
-        baseOptions: { modelAssetPath: SEG_MODEL, delegate },
-        outputCategoryMask: true, outputConfidenceMasks: false
-      });
-      try { segmenter = await make('GPU'); } catch (e) { segmenter = await make('CPU'); }
+      try {
+        segWorker = await startSegWorker();
+      } catch (e) {
+        // 작업 공간을 못 쓰는 브라우저면 예전처럼 화면과 같은 곳에서 계산
+        console.warn('작업 공간 대신 화면에서 직접 인식할게요', e);
+        const make = (delegate) => InteractiveSegmenter.createFromOptions(vision, {
+          baseOptions: { modelAssetPath: SEG_MODEL, delegate },
+          outputCategoryMask: true, outputConfidenceMasks: false
+        });
+        try { segmenter = await make('GPU'); } catch (e2) { segmenter = await make('CPU'); }
+      }
 
       // 손 인식은 실패해도 사진 인식은 계속 되게 따로
       const makeHands = (delegate) => HandLandmarker.createFromOptions(vision, {
@@ -680,17 +715,13 @@
 
     // ---------- 틀 안에 불똥이가 있는지 ----------
 
-    // 점 하나를 찍으면 그 점에 있는 물체만 잘라낸 마스크 (1 = 물체, 찍은 점과 이어진 덩어리만)
-    function segmentAt(w, h, px, py) {
-      let out = null;
+    // AI가 준 마스크에서, 찍은 점과 이어진 물체 덩어리만 남김 (1 = 물체)
+    function componentAt(arr, w, h, px, py) {
+      if (!arr) return null;
       const start = Math.min(h - 1, Math.round(py * h)) * w + Math.min(w - 1, Math.round(px * w));
-      segmenter.segment(work, { keypoint: { x: px, y: py } }, (res) => {
-        const arr = res.categoryMask.getAsUint8Array();
-        const fg = arr[start];
-        out = new Uint8Array(w * h);
-        for (let i = 0; i < out.length; i++) out[i] = arr[i] === fg ? 1 : 0;
-      });
-      if (!out) return null;
+      const fg = arr[start];
+      const out = new Uint8Array(w * h);
+      for (let i = 0; i < out.length; i++) out[i] = arr[i] === fg ? 1 : 0;
       const comp = new Uint8Array(w * h);
       const q = new Int32Array(w * h);
       let head = 0, tail = 0;
@@ -706,15 +737,28 @@
     }
 
     // 틀(+여유) 부분만 잘라서 틀 가운데를 찍어보고, 잘린 물체가 틀을 얼마나 채우는지 계산
-    function checkGuide() {
+    const PROBE_POINTS = [[0.5, 0.55], [0.5, 0.4]];   // 몸통 가운데, 조금 위
+    async function checkGuide() {
       const r = guideInVideo(MARGIN);
       const w = WORK_W, h = Math.round(WORK_W * r.h / r.w);
       if (work.width !== w || work.height !== h) { work.width = w; work.height = h; }
       wctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, w, h);
+      // 작업 공간이 있으면 거기서 두 점을 한 번에 계산 (화면은 계속 그려짐), 없으면 여기서 직접
+      let raws;
+      if (segWorker) {
+        raws = await segWorker.segment(await createImageBitmap(work), PROBE_POINTS);
+      } else {
+        raws = PROBE_POINTS.map(([px, py]) => {
+          let a = null;
+          segmenter.segment(work, { keypoint: { x: px, y: py } }, res => { a = res.categoryMask.getAsUint8Array().slice(); });
+          return a;
+        });
+      }
       const t = tplGrid(w, h);
       let best = null;
-      for (const [px, py] of [[0.5, 0.55], [0.5, 0.4]]) {   // 몸통 가운데, 조금 위
-        const mask = segmentAt(w, h, px, py);
+      for (let k = 0; k < PROBE_POINTS.length; k++) {
+        const [px, py] = PROBE_POINTS[k];
+        const mask = componentAt(raws[k], w, h, px, py);
         if (!mask) continue;
         let inter = 0, outside = 0;
         for (let i = 0; i < mask.length; i++) {
@@ -726,7 +770,7 @@
         if (!best || (ok && !best.ok) || (ok === best.ok && cover - spill > best.cover - best.spill)) {
           best = { mask, cover, spill, ok };
         }
-        if (ok) break;   // 첫 번째 점으로 인식되면 두 번째는 건너뜀 (AI 계산을 반으로)
+        if (ok) break;   // 첫 번째 점으로 인식되면 두 번째는 볼 필요 없음
       }
       lastInfo = best;
       return !!(best && best.ok);
@@ -1108,10 +1152,12 @@
 
     // ---------- 화면 ----------
 
+    // 레티나(2배)에서 캔버스를 2배로 그리면 매 프레임 1,000만 픽셀 이상 → 카메라가 1080p라 그만큼 필요 없어서 상한을 둠
+    function stageDpr() { return Math.min(window.devicePixelRatio || 1, STAGE_MAX_DPR); }
     function resize() {
-      const dpr = window.devicePixelRatio || 1;
-      stage.width = innerWidth * dpr;
-      stage.height = innerHeight * dpr;
+      const dpr = stageDpr();
+      stage.width = Math.round(innerWidth * dpr);
+      stage.height = Math.round(innerHeight * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
@@ -1148,9 +1194,9 @@
 
     async function detectLoop() {
       while (true) {
-        if (guideOn && segmenter && video.videoWidth) {
+        if (guideOn && (segWorker || segmenter) && video.videoWidth) {
           let ok = false;
-          try { ok = checkGuide(); } catch (e) { console.error(e); }
+          try { ok = await checkGuide(); } catch (e) { console.error(e); }
 
           if (ok) {
             missCount = 0;
@@ -1504,7 +1550,7 @@
       lowc.setTransform(lw / innerWidth, 0, 0, lh / innerHeight, 0, 0);
       drawVideo(lowc, 0);
 
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = stageDpr();
       const gw = Math.round(innerWidth * dpr), gh = Math.round(innerHeight * dpr);
       if (glass.width !== gw || glass.height !== gh) { glass.width = gw; glass.height = gh; }
       glassc.setTransform(dpr, 0, 0, dpr, 0, 0);
