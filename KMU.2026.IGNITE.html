@@ -202,7 +202,9 @@
     const PARTICLE_MAX = 700;    // 화면 전체 불티·불꽃 최대 개수 (아이맥이 무거워지지 않게)
     const THROW_SPEED = 1.2;     // 놓기 직전 평균 손 속도가 1초에 화면 높이의 이만큼보다 빠르면 "던짐" → 화면 밖으로 날아감
     const THROW_STRAIGHT = 0.8;  // 그리고 이만큼 한 방향으로 곧게 움직였을 때만 (흔들며 놀다 놓은 건 던짐 아님)
-    const THROW_WINDOW_MS = 150; // 던질 속도를 재는 구간 (손가락 벌리기 직전 이 시간 동안의 평균)
+    const THROW_WINDOW_MS = 100; // 던질 속도를 재는 구간 길이 (이 시간 동안의 평균)
+    const THROW_SEARCH_MS = 300; // 손가락 벌리기 전 이 시간 안에서 가장 빨랐던 구간을 찾음
+    const LOST_THROW_MS = 100;   // 잡고 있던 손을 이만큼 놓쳤는데 직전에 던지는 중이었으면 바로 던짐
     const THROW_SKIP_MS = 40;    // 손가락을 벌리기 시작한 바로 전후 이 시간은 빼고 잼 (벌릴 때 손이 움찔해서)
     const THROW_SHAKE_MS = 300;  // 흔들다 놓았는지 보는 구간
     const THROW_SHAKE_SPEED = 1.5; // 이 구간에 손이 1초에 화면 높이의 이만큼보다 빨리 오갔으면 흔들다 던진 걸로 봄
@@ -707,6 +709,12 @@
       for (const p of pinches) {
         if (p.seen || !p.visible) continue;
         const lost = t - p.lastT;
+        // 세게 휘두르면 영상이 흐려져 손을 놓침 → 놓치기 직전에 빠르게 던지는 중이었으면 바로 던진 걸로
+        if (p.down && p.sprite && lost > LOST_THROW_MS && throwKind(throwVelocity(p, true))) {
+          p.visible = false;
+          pinchEnd(p, true);
+          continue;
+        }
         if (p.down && lost < HAND_LOST_MS) {
           const step = Math.min(0.05, dt);
           p.x += p.vx * step; p.y += p.vy * step;
@@ -743,24 +751,35 @@
         if (p.gapS > PINCH_OFF) {
           if (!p.openCount) p.openStartT = t;   // 손가락을 벌리기 시작한 순간 (던질 속도는 이 직전 기준)
           p.openCount = (p.openCount || 0) + 1;
-        } else p.openCount = 0;
+        } else { p.openCount = 0; p.openStartT = 0; }   // 다시 오므렸으면 벌리기 시작 시각도 지움 (예전 시각으로 속도 재지 않게)
         if (p.openCount >= RELEASE_FRAMES) { p.openCount = 0; pinchEnd(p); }
       }
     }
 
-    // 던질 속도: 손가락을 벌리기 직전 THROW_WINDOW_MS 동안의 평균 손 속도와 얼마나 한 방향으로 곧게 움직였는지
-    //  - 순간 최고 속도 대신 평균: 손 위치가 한 프레임 튀거나 손가락 벌릴 때 흔들리는 건 던짐으로 안 봄
-    //  - 벌리기 시작한 직후(THROW_SKIP_MS)는 빼고 잼: 손가락이 벌어지며 잡은 위치가 움찔하는 구간
-    //  - straight: 이리저리 흔들다 놓으면 낮고(0에 가까움), 한 방향으로 휙 던지면 1에 가까움
-    function throwVelocity(p) {
-      const end = (p.openStartT || p.lastT) - THROW_SKIP_MS;
-      const pts = (p.hist || []).filter(h => h.t <= end && h.t >= end - THROW_WINDOW_MS);
-      if (pts.length < 3) return { vx: 0, vy: 0, sp: 0, straight: 0 };
-      const a = pts[0], b = pts[pts.length - 1], dt = (b.t - a.t) / 1000;
-      if (dt < 0.05) return { vx: 0, vy: 0, sp: 0, straight: 0 };
-      let path = 0;
-      for (let i = 1; i < pts.length; i++) path += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
-      const net = Math.hypot(b.x - a.x, b.y - a.y);
+    // 던질 속도: 손가락을 벌리기 전 THROW_SEARCH_MS 안에서, 곧게 움직인 THROW_WINDOW_MS 구간 중 가장 빨랐던 평균 속도
+    //  - 맨 마지막만 재면 손가락을 알아챌 땐 이미 감속 중이라 느리게 나옴 → 가장 빨랐던 구간을 씀
+    //  - 순간(한 프레임) 대신 구간 평균: 손 위치가 한 프레임 튀는 건 던짐으로 안 봄
+    //  - 벌리기 시작한 직후(THROW_SKIP_MS)는 빼고 잼: 손가락이 벌어지며 잡은 위치가 움찔하는 구간 (손을 놓쳤을 땐 안 뺌)
+    //  - straight: 이리저리 흔들면 낮고(0에 가까움), 한 방향으로 휙 던지면 1에 가까움
+    function throwVelocity(p, lost) {
+      const end = (lost ? p.lastT : (p.openStartT || p.lastT) - THROW_SKIP_MS);
+      const pts = (p.hist || []).filter(h => h.t <= end && h.t >= end - THROW_SEARCH_MS);
+      let best = { vx: 0, vy: 0, sp: 0, straight: 0 };
+      for (let i = 0; i < pts.length; i++) {
+        // i에서 시작해 THROW_WINDOW_MS 안에 드는 마지막 점까지
+        let j = i;
+        while (j + 1 < pts.length && pts[j + 1].t - pts[i].t <= THROW_WINDOW_MS + 5) j++;
+        const a = pts[i], b = pts[j], dt = (b.t - a.t) / 1000;
+        if (j - i < 2 || dt < 0.05) continue;
+        let path = 0;
+        for (let k = i + 1; k <= j; k++) path += Math.hypot(pts[k].x - pts[k - 1].x, pts[k].y - pts[k - 1].y);
+        const net = Math.hypot(b.x - a.x, b.y - a.y), sp = net / dt, straight = path ? net / path : 0;
+        // 곧게 움직인 구간을 먼저, 그다음 빠른 구간을
+        if ((straight > THROW_STRAIGHT) > (best.straight > THROW_STRAIGHT) ||
+            ((straight > THROW_STRAIGHT) === (best.straight > THROW_STRAIGHT) && sp > best.sp)) {
+          best = { vx: (b.x - a.x) / dt, vy: (b.y - a.y) / dt, sp, straight };
+        }
+      }
       // 흔들기: 좀 더 긴 구간(THROW_SHAKE_MS) 동안 손이 움직인 거리의 속도 + 마지막으로 휘두른 방향
       //  (빠르게 왔다 갔다 하다 놓으면 방향이 바뀌는 순간이라 평균 속도는 0에 가깝지만, 이걸로 던짐을 알아챔)
       const sh = (p.hist || []).filter(h => h.t <= end && h.t >= end - THROW_SHAKE_MS);
@@ -771,10 +790,14 @@
         if (d > 4) { dirX = dx / d; dirY = dy / d; break; }
       }
       const shDt = sh.length > 1 ? (sh[sh.length - 1].t - sh[0].t) / 1000 : 0;
-      return {
-        vx: (b.x - a.x) / dt, vy: (b.y - a.y) / dt, sp: net / dt, straight: path ? net / path : 0,
-        shakeSp: shDt > 0.1 ? shakePath / shDt : 0, dirX, dirY
-      };
+      return { ...best, shakeSp: shDt > 0.1 ? shakePath / shDt : 0, dirX, dirY };
+    }
+
+    // 놓을 때 어떻게 할지: 'throw' 휙 던짐 / 'shake' 흔들다 던짐 / null 그냥 놓기
+    function throwKind(v) {
+      if (v.sp > innerHeight * THROW_SPEED && v.straight > THROW_STRAIGHT) return 'throw';
+      if (v.shakeSp > innerHeight * THROW_SHAKE_SPEED && (v.dirX || v.dirY)) return 'shake';
+      return null;
     }
 
     // 손가락 사이에서 가장 가까운, 아무도 안 잡은 불똥이
@@ -800,20 +823,22 @@
       spark(p.x, p.y, 10);
     }
 
-    function pinchEnd(p) {
+    function pinchEnd(p, lost) {
       p.down = false;
       const s = p.sprite;
       if (!s) return;
       s.holder = null;
-      const v = throwVelocity(p);
+      const v = throwVelocity(p, lost);
+      const kind = throwKind(v);
       p.openStartT = 0;
+      p.openCount = 0;
       p.hist = [];
-      if (v.sp > innerHeight * THROW_SPEED && v.straight > THROW_STRAIGHT) {
+      if (kind === 'throw') {
         // 세게 던지면: 그 속도(조금 더 힘껏) 그대로 포물선을 그리며 날아가 화면 밖에서 불이 꺼짐
         s.thrown = true;
         s.tvx = v.vx * THROW_BOOST; s.tvy = v.vy * THROW_BOOST;
         s.spinV = Math.max(-8, Math.min(8, v.vx * 0.004));
-      } else if (v.shakeSp > innerHeight * THROW_SHAKE_SPEED && (v.dirX || v.dirY)) {
+      } else if (kind === 'shake') {
         // 빠르게 흔들다 놓으면: 마지막으로 휘두른 방향으로 날아감 (흔든 빠르기만큼, 너무 세지 않게)
         const sp = Math.min(v.shakeSp, innerHeight * 2.2) * THROW_BOOST;
         s.thrown = true;
